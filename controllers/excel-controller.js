@@ -494,7 +494,7 @@ const patchBillsFromExcel = async (req, res) => {
     fs.writeFileSync(tempFilePath, uploadedFile.buffer);
 
     // Call the patch logic with team name
-    const patchResult = await patchBillsFromExcelFile(tempFilePath, teamName);
+    const patchResult = await patchBillsFromExcelFile(tempFilePath, teamName, req.query.team);
 
     if (fs.existsSync(tempFilePath)) {
       fs.unlinkSync(tempFilePath);

@@ -423,10 +423,6 @@ function validateVendorFields(vendorData, rowNumber, rowData) {
   const requiredFields = ['vendorNo', 'vendorName', 'PANStatus', 'complianceStatus'];
   const missingFields = requiredFields.filter(field => !vendorData[field]);
 
-  if (missingFields.length === 0) {
-    return { valid: true };
-  }
-
   if (!vendorData.PAN && vendorData.vendorName) {
     vendorData.PAN = '';
   }
@@ -441,9 +437,23 @@ function validateVendorFields(vendorData, rowNumber, rowData) {
       valid: false,
       error: `Missing required fields: ${stillMissingFields.join(', ')}`
     };
-  } else {
-    return { valid: true };
   }
+
+  //phone Number validation
+  if (vendorData.phoneNumbers && vendorData.phoneNumbers.length > 0) {
+    for (const phone of vendorData.phoneNumbers) {
+      const phoneStr = String(phone).trim();
+
+      if (!/^\d+$/.test(phoneStr)) {
+        return {
+          valid: false,
+          error: `Invalid phone number "${phoneStr}". Phone numbers must contain only numeric digits.`
+        };
+      }
+    }
+  }
+
+  return { valid: true };
 }
 
 /**

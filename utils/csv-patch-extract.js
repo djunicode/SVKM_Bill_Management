@@ -8,6 +8,7 @@ import PanStatusMaster from '../models/pan-status-master-model.js';
 import ComplianceMaster from '../models/compliance-master-model.js';
 import RegionMaster from '../models/region-master-model.js';
 import { headerMapping } from './headerMap.js'; // Import centralized header mapping
+import { Admin } from 'mongodb';
 
 /**
  * Reads an Excel file and extracts each data row (for debugging purposes)
@@ -271,10 +272,16 @@ const teamFieldRestrictions = {
     "migoDetails.doneBy"
   ],
   "PIMO & MIGO/SES Team": [
+    "migoDetails.no",
+    "migoDetails.date",
+    "migoDetails.amount",
+    "migoDetails.doneBy",
+
     "sesDetails.no",
     "sesDetails.amount",
     "sesDetails.date",
     "sesDetails.doneBy",
+
     "pimoMumbai.dateReturnedFromDirector"
   ],
   "Accounts Team": [
@@ -454,6 +461,72 @@ function applyBusinessRules(updateObj) {
   }
 }
 
+
+// helper fuction to get bills for particular team
+export function getPatchValidationFilter(role) {
+  let filter = {};
+
+  switch (role) {
+    case "site_officer":
+      return {
+        ...filter,
+        "pimoMumbai.dateReceived": null,
+        siteStatus: "hold",
+        currentCount: 1
+      };
+
+    case "site_pimo":
+      return {
+        ...filter,
+        currentCount: 3,
+        $or: [
+          {
+            "pimoMumbai.dateGiven": { $ne: null },
+            "accountsDept.dateReceived": null
+          },
+          {
+            siteStatus: "accept",
+            "accountsDept.dateReceived": null
+          }
+        ]
+      };
+
+    case "accounts":
+      return {
+        ...filter,
+        "accountsDept.paymentDate": null,
+        "accountsDept.dateGiven": { $ne: null },
+        currentCount: 5
+      };
+
+    case "director":
+      return {
+        ...filter,
+        "approvalDetails.directorApproval.dateGiven": { $ne: null },
+        "pimoMumbai.dateReturnedFromDirector": null,
+        siteStatus: { $in: ["accept", "hold"] },
+        "accountsDept.paymentDate": null
+      };
+
+    case "qs_site":
+      return {
+        ...filter,
+        $and: [
+          { "pimoMumbai.dateReturnedFromQs": null },
+          {
+            $or: [
+              { "qsInspection.dateGiven": { $ne: null } },
+              { "qsCOP.dateGiven": { $ne: null } },
+              { "qsMumbai.dateGiven": { $ne: null } }
+            ]
+          }
+        ]
+      };
+
+    default:
+      return filter;
+  }
+}
 /**
  * Processes a single row for patch updates
  * @param {Object} rowData - Extracted row data
@@ -464,15 +537,18 @@ function applyBusinessRules(updateObj) {
  * @param {Object} ignoredFieldsCount - Object tracking ignored field counts
  * @returns {Promise<Object>} Result object with updated flag and optional srNo or reason
  */
-async function processPatchRow(rowData, columnMapping, srNoHeader, allowedFields, updateSummary, ignoredFieldsCount) {
+async function processPatchRow(rowData, columnMapping, srNoHeader, allowedFields, updateSummary, ignoredFieldsCount, role) {
   // Use the identified Sr No header, or try fallback
   const srNo = srNoHeader && rowData[srNoHeader] ? String(rowData[srNoHeader]).trim() : null;
 
   if (!srNo) {
     return { updated: false, reason: 'missing_srno' };
   }
-
-  const bill = await Bill.findOne({ srNo });
+  const homeFilter = getPatchValidationFilter(role);
+  const bill = await Bill.findOne({
+    srNo,
+    ...homeFilter
+  });
   if (!bill) {
     return { updated: false, reason: 'bill_not_found', srNo };
   }
@@ -573,7 +649,7 @@ function formatPatchResults(updated, skipped, teamName, updateSummary, ignoredFi
  * @returns {Promise<Object>} Object containing patch statistics and results
  * @throws {Error} If Excel file cannot be read or no worksheet is found
  */
-export async function patchBillsFromExcelFile(filePath, teamName = null) {
+export async function patchBillsFromExcelFile(filePath, teamName = null, role = Admin) {
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.readFile(filePath);
 
@@ -612,7 +688,7 @@ export async function patchBillsFromExcelFile(filePath, teamName = null) {
 
     const rowData = extractPatchRowData(row, headers);
 
-    const result = await processPatchRow(rowData, columnMapping, srNoHeader, allowedFields, updateSummary, ignoredFieldsCount);
+    const result = await processPatchRow(rowData, columnMapping, srNoHeader, allowedFields, updateSummary, ignoredFieldsCount, role);
 
     if (result.updated) {
       updated++;

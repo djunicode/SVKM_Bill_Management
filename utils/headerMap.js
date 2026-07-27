@@ -160,7 +160,7 @@ export const headerMapping = {
   "MIGO Amount": "migoDetails.amount",
   "Migo done by": "migoDetails.doneBy",
   "MIGO Done By": "migoDetails.doneBy",
-
+  "MIGO done by": "migoDetails.doneBy",
   // Invoice Return to Site
   "Dt-Inv returned to Site office": "invReturnedToSite",
   "Date Invoice Returned to Site Office": "invReturnedToSite",
@@ -275,10 +275,11 @@ export const headerMapping = {
   "Inv given for booking and checking": "accountsDept.invBookingChecking",
   "Invoice Booking and Checking": "accountsDept.invBookingChecking",
   "Payment instructions": "accountsDept.paymentInstructions",
-  "Payment Instructions": "accountsDept.paymentInstructions",
+  "Payment Instruction": "accountsDept.paymentInstructions",
   "Remarks for pay instructions": "accountsDept.remarksForPayInstructions",
   "Payment Instructions Remarks": "accountsDept.remarksForPayInstructions",
   "F110 Identification": "accountsDept.f110Identification",
+  "F110": "accountsDept.f110Identification",
   "Dt of Payment": "accountsDept.paymentDate",
   "Payment Date": "accountsDept.paymentDate",
   "Hard Copy": "accountsDept.hardCopy",

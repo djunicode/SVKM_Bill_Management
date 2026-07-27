@@ -218,14 +218,14 @@ export const changeBatchWorkflowState = async (req, res) => {
 
             setObj["qsInspection.dateGiven"] = now;
             setObj["qsInspection.name"] = toName;
-            setObj["maxCount"] = Math.max(billFound.maxCount, 2);
-            setObj["currentCount"] = 2;
+            setObj["maxCount"] = Math.max(billFound.maxCount, 1);
+            setObj["currentCount"] = 1;
           } else if (toRoleArray.includes("qs_cop")) {
 
             setObj["qsCOP.dateGiven"] = now;
             setObj["qsCOP.name"] = toName;
-            setObj["maxCount"] = Math.max(billFound.maxCount, 2);
-            setObj["currentCount"] = 2;
+            setObj["maxCount"] = Math.max(billFound.maxCount, 1);
+            setObj["currentCount"] = 1;
           } else if (toRoleArray.includes("migo_entry")) {
 
             setObj["migoDetails.dateGiven"] = now;

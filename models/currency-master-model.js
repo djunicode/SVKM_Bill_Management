@@ -2,7 +2,7 @@ import mongoose from "mongoose";
 
 const currencyMasterSchema = new mongoose.Schema(
   {
-    currency: { type: String, required: true, unique: true },
+    currency: { type: String, required: true, unique: true, uppercase: true, },
   },
   { timestamps: true }
 );
