@@ -420,9 +420,7 @@ async function processVendorRowData(rowData, rowNumber) {
  * @returns {Object} Validation result with valid flag and optional error message
  */
 function validateVendorFields(vendorData, rowNumber, rowData) {
-  const requiredFields = ['vendorNo', 'vendorName', 'PANStatus', 'complianceStatus'];
-  const missingFields = requiredFields.filter(field => !vendorData[field]);
-
+  const requiredFields = ['vendorNo', 'vendorName', 'PANStatus', 'complianceStatus', 'emailIds', 'phoneNumbers'];
   if (!vendorData.PAN && vendorData.vendorName) {
     vendorData.PAN = '';
   }

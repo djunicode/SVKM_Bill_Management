@@ -568,7 +568,7 @@ const importVendors = async (req, res) => {
       headers.push((cell.value || '').toString().trim());
     });
 
-    const requiredHeaders = ['Vendor No', 'Vendor Name', 'PAN Status', '206AB Compliance'];
+    const requiredHeaders = ['Vendor No', 'Vendor Name', 'PAN Status', '206AB Compliance', "Email IDs", "Phone No"];
     const missingHeaders = requiredHeaders.filter(h => !headers.includes(h));
     if (missingHeaders.length > 0) {
       if (fs.existsSync(tempFilePath)) fs.unlinkSync(tempFilePath);
