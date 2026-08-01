@@ -451,6 +451,18 @@ function validateVendorFields(vendorData, rowNumber, rowData) {
     }
   }
 
+  if (vendorData.emailIds && vendorData.emailIds.length > 0) {
+    for (const email of vendorData.emailIds) {
+      const emailstr = String(email).trim();
+
+      if (!/^\d+$/.test(emailstr)) {
+        return {
+          valid: false,
+          error: `Invalid email id "${emailstr}" : must contain @ and . in emailID.`
+        };
+      }
+    }
+  }
   return { valid: true };
 }
 
