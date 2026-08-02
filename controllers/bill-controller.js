@@ -392,13 +392,6 @@ const getBills = async (req, res) => {
     if (team_name) {
       if (team_name === "qs_site") {
         // QS Team - Home Tab Logic
-        // Include bills where:
-        // "Dt given-QS for measure" (qsInspection.dateGiven) is filled,
-        // OR if it is empty, auto-derive it by checking in order:
-        // "Dt Given-QS for Prov COP" (qsCOP.dateGiven)
-        // if still empty, "Dt given-QS Mumbai for COP" (qsMumbai.dateGiven)
-        // AND "Dt ret-PIMO by QS Mumbai" (pimoMumbai.dateReturnedFromQs) is not filled.
-
         filter = {
           ...filter,
           $and: [
@@ -412,16 +405,51 @@ const getBills = async (req, res) => {
             }
           ]
         };
-      } else if (team_name === "trustees") {
-        // Trustees Team - Home Tab Logic
-        // Include bills where:
-        // Status at site is "Hold" or "Accept"
-        // AND "Date of Payment" (accountsDept.paymentDate) is not filled.
-
+      } else if (team_name === "trustees" || team_name === "director") {
+        // Trustees/Director Team - Home Tab Logic
         filter = {
           ...filter,
           siteStatus: { $in: ["hold", "accept"] },
-          "accountsDept.paymentDate": null
+          $or: [
+            { "accountsDept.paymentDate": null },
+            { "accountsDept.status": { $ne: "Paid" } }
+          ]
+        };
+      } else if (team_name === "site_officer") {
+        // Site Officer - Home Tab Logic
+        filter = {
+          ...filter,
+          "pimoMumbai.dateReceived": null
+        };
+      } else if (team_name === "site_pimo") {
+        // PIMO - Home Tab Logic
+        filter = {
+          ...filter,
+          "pimoMumbai.dateReceived": { $ne: null },
+          "accountsDept.dateReceived": null
+        };
+      }
+    } else {
+      // Fallback if team_name is not provided but we have req.user.role
+      if (req.user.role.includes("site_officer")) {
+        filter = {
+          ...filter,
+          "pimoMumbai.dateReceived": null
+        };
+      } else if (req.user.role.includes("site_pimo")) {
+        filter = {
+          ...filter,
+          "pimoMumbai.dateReceived": { $ne: null },
+          "accountsDept.dateReceived": null
+        };
+      } else if (req.user.role.includes("director")) {
+        filter = {
+          ...filter,
+          siteStatus: { $in: ["hold", "accept"] },
+          $or: [
+            { "accountsDept.paymentDate": null },
+            { "accountsDept.status": { $ne: "Paid" } }
+          ]
         };
       }
     }
@@ -756,6 +784,20 @@ const patchBill = async (req, res) => {
 
     // Process QS-related fields and organize them properly
     organizeQSFields(req.body);
+
+    // Parse stringified objects from FormData (e.g. pimoMumbai, accountsDept)
+    for (const key of Object.keys(req.body)) {
+      if (typeof req.body[key] === "string" && (req.body[key].startsWith("{") || req.body[key].startsWith("["))) {
+        try {
+          const parsed = JSON.parse(req.body[key]);
+          if (parsed && typeof parsed === "object") {
+            req.body[key] = parsed;
+          }
+        } catch (e) {
+          // Not a valid JSON string, leave it as is
+        }
+      }
+    }
 
     // Check if bill date is being changed, which may require regenerating the srNo
     let regenerateSerialNumber = false;

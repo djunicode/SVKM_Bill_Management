@@ -39,18 +39,7 @@ export const getBillsAboveLevel = async (req, res) => {
     if (!query) {
       switch (role) {
         case "site_officer":
-          query = {
-            $or: [
-              { "pimoMumbai.dateReceived": { $ne: null } },
-              {
-                $and: [
-                  { siteStatus: { $in: ["proforma", "reject"] } },
-                  { "pimoMumbai.dateReceived": { $ne: null } },
-                  { "accountsDept.paymentDate": { $ne: null } },
-                ],
-              },
-            ],
-          };
+          query = { "pimoMumbai.dateReceived": { $ne: null } };
           break;
         case "site_pimo":
           query = { "accountsDept.dateReceived": { $ne: null } };
@@ -60,10 +49,10 @@ export const getBillsAboveLevel = async (req, res) => {
           break;
         case "director":
           query = {
-            $and: [
-              { "accountsDept.paymentDate": { $ne: null } },
-            ],
-          }
+            siteStatus: { $in: ["hold", "accept"] },
+            "accountsDept.paymentDate": { $ne: null },
+            "accountsDept.status": "Paid"
+          };
           break;
         case "qs_site":
           query = { "pimoMumbai.dateReturnedFromQs": { $ne: null } };
