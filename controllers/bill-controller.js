@@ -1007,7 +1007,7 @@ const patchBill = async (req, res) => {
 
     // For date comparison, use date range to match same day regardless of time
     const taxInvDate = req.body.taxInvDate !== undefined ? req.body.taxInvDate : existingBill.taxInvDate;
-    if (taxInvDate) {
+    if (taxInvDate && Object.keys(uniqueQuery).length > 0) {
       const inputDate = new Date(taxInvDate);
       const startOfDay = new Date(inputDate.getFullYear(), inputDate.getMonth(), inputDate.getDate(), 0, 0, 0);
       const endOfDay = new Date(inputDate.getFullYear(), inputDate.getMonth(), inputDate.getDate(), 23, 59, 59, 999);
@@ -1018,7 +1018,10 @@ const patchBill = async (req, res) => {
       };
     }
 
-    const duplicate = await Bill.findOne(uniqueQuery);
+    let duplicate = null;
+    if (Object.keys(uniqueQuery).length > 0) {
+      duplicate = await Bill.findOne(uniqueQuery);
+    }
     if (duplicate) {
       return res.status(400).json({
         success: false,
