@@ -1,8 +1,16 @@
 import mongoose from "mongoose";
+import { asValidator } from "../constants/fieldFormats.js";
 
 const vendorMasterSchema = new mongoose.Schema(
   {
-    vendorNo: { type: Number, unique: true, required: true },
+    // col 6 - "numeric 6 digits". Enforced here so the import path cannot
+    // create shorter numbers (observations, Imports #6.iii).
+    vendorNo: {
+      type: Number,
+      unique: true,
+      required: true,
+      validate: asValidator("vendorNo"),
+    },
     vendorName: { type: String, required: true },
     PAN: { type: String },
     GSTNumber: { type: String },

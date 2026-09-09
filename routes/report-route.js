@@ -22,10 +22,16 @@ import {
 
 router.use(authenticate);
 
+// Role names as the user schema spells them. Both PIMO spellings are listed:
+// the login role is site_pimo, pimo_mumbai is the workflow team name and is
+// also a valid enum value. PIMO_ROLES carried only pimo_mumbai, so the real
+// PIMO user got 403 from four of their own reports - Invoices at PIMO,
+// Invoices sent to Accts Team, Bill Journey and Invoices at QS Mumbai. Only
+// SITE_ROLES happened to list both, which is why the site reports worked.
 const DIRECTOR_ROLES = ["director", "admin"];
 const ACCOUNTS_ROLES = ["accounts", ...DIRECTOR_ROLES];
-const PIMO_ROLES = ["pimo_mumbai", ...DIRECTOR_ROLES];
-const SITE_ROLES = ["site_officer", "site_pimo", ...PIMO_ROLES];
+const PIMO_ROLES = ["site_pimo", "pimo_mumbai", ...DIRECTOR_ROLES];
+const SITE_ROLES = ["site_officer", ...PIMO_ROLES];
 const QS_ROLES = ["qs_site", "qs_mumbai", "admin"];
 
 // 12. Outstanding Bills Report
@@ -73,7 +79,7 @@ router.get(
 // 5. Invoices with QS Mumbai for COP
 router.get(
   "/invoices-received-at-qsmumbai",
-  authorize([...QS_ROLES, "pimo_mumbai"]),
+  authorize([...QS_ROLES, "site_pimo", "pimo_mumbai"]),
   getInvoicesAtQSMumbai
 );
 

@@ -58,22 +58,59 @@ export const dateBlank = (fieldPath) => ({
   [fieldPath]: { $eq: null },
 });
 
+/**
+ * The Report logics sheet sets the default selection window at
+ * 01-01-2020 to today (revised up from "today only" in the earlier spec).
+ */
+export const REPORT_DEFAULT_START = "2020-01-01";
+
+/**
+ * Apply the report's date window.
+ *
+ * Previously a range was only applied when BOTH ends were supplied, so a
+ * one-sided selection silently widened to every bill ever raised. Each end is
+ * now honoured on its own, and when neither is given the documented default
+ * window applies.
+ */
 export const applyOptionalDateRange = (filter, fieldPath, query) => {
   const startDate = normalizeQueryValue(query.startDate);
   const endDate = normalizeQueryValue(query.endDate);
-  if (startDate && endDate) {
-    filter[fieldPath] = {
-      $gte: startOfDay(startDate),
-      $lte: endOfDay(endDate),
-    };
+
+  const range = {};
+  if (startDate) range.$gte = startOfDay(startDate);
+  if (endDate) range.$lte = endOfDay(endDate);
+
+  if (!startDate && !endDate) {
+    range.$gte = startOfDay(REPORT_DEFAULT_START);
+    range.$lte = endOfDay(new Date());
   }
+
+  // Preserve any emptiness test already on this field (dateFilled / dateBlank).
+  filter[fieldPath] =
+    filter[fieldPath] && typeof filter[fieldPath] === "object"
+      ? { ...filter[fieldPath], ...range }
+      : range;
+};
+
+/**
+ * Every region the caller asked for, as a de-duplicated array of strings.
+ *
+ * The report pages seed their region dropdown from the user's own region list
+ * and send the whole list until a single region is picked, so `region` arrives
+ * as `region[]=MUMBAI&region[]=INDORE`. normalizeQueryValue() kept only the
+ * FIRST entry, so a user with more than one region saw one region's bills while
+ * the dropdown still read "All Regions" (observations Q-08, and the reason
+ * clearing a vendor name never appeared to restore the full list).
+ */
+export const normalizeQueryList = (value) => {
+  const raw = Array.isArray(value) ? value : value == null ? [] : [value];
+  return [...new Set(raw.map((v) => String(v).trim()).filter(Boolean))];
 };
 
 export const applyRegionFilter = (filter, region) => {
-  const value = normalizeQueryValue(region);
-  if (value) {
-    filter.region = value;
-  }
+  const values = normalizeQueryList(region);
+  if (values.length === 1) filter.region = values[0];
+  else if (values.length > 1) filter.region = { $in: values };
 };
 
 export const applyVendorFilter = async (filter, vendorName) => {

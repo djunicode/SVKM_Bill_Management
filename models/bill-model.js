@@ -2,6 +2,7 @@ import mongoose from "mongoose";
 import RegionMaster from "./region-master-model.js";
 import PanStatusMaster from "./pan-status-master-model.js";
 import ComplianceMaster from "./compliance-master-model.js";
+import { asValidator, SITE_STATUS } from "../constants/fieldFormats.js";
 
 //redundant master tables ko isme daal diya
 const billSchema = new mongoose.Schema(
@@ -105,7 +106,7 @@ const billSchema = new mongoose.Schema(
     // All vendor-related fields (vendorNo, vendorName, gstNumber, panStatus, compliance206AB)
     // are now derived from the vendor reference to ensure data consistency
     poCreated: { type: String, enum: ["Yes", "No"], required: true },
-    poNo: { type: String },
+    poNo: { type: String, validate: asValidator("poNo") }, // col 12
     poDate: { type: Date },
     poAmt: { type: Number },
     proformaInvNo: { type: String },
@@ -113,7 +114,7 @@ const billSchema = new mongoose.Schema(
     proformaInvAmt: { type: Number },
     proformaInvRecdAtSite: { type: Date },
     proformaInvRecdBy: { type: String },
-    taxInvNo: { type: String },
+    taxInvNo: { type: String, validate: asValidator("taxInvNo") }, // col 20
     taxInvDate: { type: Date },
     taxInvAmt: { type: Number },
     taxInvRecdAtSite: { type: Date, required: true },
@@ -134,7 +135,7 @@ const billSchema = new mongoose.Schema(
     },
     advanceDate: { type: Date },
     advanceAmt: { type: Number },
-    advancePercentage: { type: Number },
+    advancePercentage: { type: Number, validate: asValidator("advancePercentage") }, // col 31
     advRequestEnteredBy: { type: String },
     qualityEngineer: {
       name: { type: String },
@@ -165,7 +166,7 @@ const billSchema = new mongoose.Schema(
     remarksByQSTeam: { type: String },
     migoDetails: {
       date: { type: Date },
-      no: { type: String },
+      no: { type: String, validate: asValidator("migoNo") }, // col 46
       amount: { type: Number },
       doneBy: { type: String },
       dateGiven: { type: Date },
@@ -190,9 +191,11 @@ const billSchema = new mongoose.Schema(
       name: { type: String },
       dateGiven: { type: Date },
     },
+    // col 60. Values per the Logic sheet: Hold / Accept / Reject Invoice /
+    // Proforma Invoice. See constants/fieldFormats.js for the display labels.
     siteStatus: {
       type: String,
-      enum: ["accept", "reject", "hold", "proforma"],
+      enum: SITE_STATUS,
       required: true,
     },
     //2 api req-pimo (date given no date recieved), main pimo(both)
@@ -227,7 +230,7 @@ const billSchema = new mongoose.Schema(
       dateReceived: { type: Date },
     },
     sesDetails: {
-      no: { type: String },
+      no: { type: String, validate: asValidator("sesNo") }, // col 72
       amount: { type: Number },
       dateGiven: { type: Date },
       doneBy: { type: String },

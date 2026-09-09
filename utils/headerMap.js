@@ -206,6 +206,7 @@ export const headerMapping = {
   "Name recd by PIMO Mumbai": "pimoMumbai.receivedBy",
   "Received By PIMO Mumbai": "pimoMumbai.receivedBy",
   "Dt given to PIMO Mumbai ": "pimoMumbai.dateGivenPIMO", // with trailing space
+  "Name given-Site to PIMO": "pimoMumbai.namePIMO", // col 61A
   "Name -PIMO": "pimoMumbai.namePIMO",
   "PIMO Name": "pimoMumbai.namePIMO",
   "Dt given to PIMO Mumbai 2": "pimoMumbai.dateGivenPIMO2",
@@ -217,6 +218,9 @@ export const headerMapping = {
   "Date Received from PIMO": "pimoMumbai.dateReceivedFromPIMO",
   "Dt returned from QS": "pimoMumbai.dateReturnedFromQs",
   "Date Returned from QS": "pimoMumbai.dateReturnedFromQs",
+  // col 78. The client's mass-update template uses this wording; without it
+  // the column was discarded before validation (observations, Mass Update #2).
+  "Dt ret-PIMO aft approval": "pimoMumbai.dateReturnedFromDirector",
   "Dt returned from Director": "pimoMumbai.dateReturnedFromDirector",
   "Date Returned from Director": "pimoMumbai.dateReturnedFromDirector",
   "Dt returned from SES": "pimoMumbai.dateReturnedFromSES",

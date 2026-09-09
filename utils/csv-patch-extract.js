@@ -8,6 +8,26 @@ import PanStatusMaster from '../models/pan-status-master-model.js';
 import ComplianceMaster from '../models/compliance-master-model.js';
 import RegionMaster from '../models/region-master-model.js';
 import { headerMapping } from './headerMap.js'; // Import centralized header mapping
+
+/**
+ * Header matching was an exact string lookup, so "Payment Instructions" missed
+ * "Payment instructions" by one character and the column was discarded before
+ * any validation ran. Normalising on case, whitespace and punctuation removes
+ * that whole class of failure.
+ */
+const normaliseHeader = (h) =>
+  String(h).toLowerCase().replace(/[\s._\-/]+/g, "").trim();
+
+const NORMALISED_HEADERS = Object.entries(headerMapping).reduce((acc, [k, v]) => {
+  acc[normaliseHeader(k)] = v;
+  return acc;
+}, {});
+
+export const lookupHeader = (header) =>
+  headerMapping[header] ||
+  headerMapping[String(header).trim()] ||
+  NORMALISED_HEADERS[normaliseHeader(header)] ||
+  null;
 import { Admin } from 'mongodb';
 
 /**
@@ -621,13 +641,40 @@ async function processPatchRow(rowData, columnMapping, srNoHeader, allowedFields
  * @param {Array<Object>} skippedDetails - Details about skipped rows
  * @returns {Object} Formatted result object
  */
-function formatPatchResults(updated, skipped, teamName, updateSummary, ignoredFieldsCount, allowedFields, skippedDetails) {
+/**
+ * Reason codes carry no meaning for the person reading the results file, so
+ * each is turned into a sentence that says what to do about it.
+ */
+const REASON_TEXT = {
+  missing_srno: "Sr no is blank - every row must carry the 7-digit Sr no",
+  bill_not_found: "No bill exists with this Sr no",
+  permission_denied: "Your team is not permitted to update the columns filled on this row",
+  no_updates: "No recognised column on this row had a value to update",
+};
+
+const explainReason = (code, teamName) => {
+  const text = REASON_TEXT[code] || `Row could not be updated (${code})`;
+  return code === "permission_denied" && teamName ? `${text} (${teamName})` : text;
+};
+
+function formatPatchResults(updated, skipped, teamName, updateSummary, ignoredFieldsCount, allowedFields, skippedDetails, unknownHeaders = []) {
   const totalIgnoredUpdates = Object.values(ignoredFieldsCount).reduce((sum, count) => sum + count, 0);
 
   return {
     updated,
     skipped,
     teamName,
+    // The results screen keys failures by Excel row number and reads `error`.
+    // skippedDetails is kept below for anyone already using it.
+    errors: skippedDetails.map((d) => ({
+      row: d.row,
+      srNo: d.srNo,
+      error: explainReason(d.reason, teamName),
+    })),
+    // Column headings in the uploaded file that the system does not recognise.
+    // Previously these were dropped in silence, which is how two columns in the
+    // client's own template went unnoticed for months.
+    unknownHeaders,
     fieldUpdateSummary: updateSummary,
     ignoredFields: {
       count: Object.keys(ignoredFieldsCount).length,
@@ -660,15 +707,17 @@ export async function patchBillsFromExcelFile(filePath, teamName = null, role = 
   let srNoHeader = null;
   const columnMapping = {}; // { header: dbField }
 
+  const unknownHeaders = [];
   headers.forEach(header => {
-    // Normalization for robust matching
-    // But headerMapping should catch most standard variations
-    const dbField = headerMapping[header] || headerMapping[header.trim()];
+    if (!header || !String(header).trim()) return;
+    const dbField = lookupHeader(header);
 
     if (dbField === 'srNo') {
       srNoHeader = header;
     } else if (dbField && allAllowedFields.includes(dbField)) {
       columnMapping[header] = dbField;
+    } else if (!dbField) {
+      unknownHeaders.push(String(header).trim());
     }
   });
 
@@ -702,5 +751,5 @@ export async function patchBillsFromExcelFile(filePath, teamName = null, role = 
     }
   }
 
-  return formatPatchResults(updated, skipped, teamName, updateSummary, ignoredFieldsCount, allowedFields, skippedDetails);
+  return formatPatchResults(updated, skipped, teamName, updateSummary, ignoredFieldsCount, allowedFields, skippedDetails, unknownHeaders);
 }

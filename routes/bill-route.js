@@ -59,7 +59,7 @@ router.post("/receiveBill", billController.receiveBillByPimoAccounts);
 // Endpoint to edit payment instructions (Accounts / Trustees / Admin)
 router.patch(
   "/payment-instructions/:id",
-  authorize("admin", "accounts", "trustees"),
+  authorize("admin", "accounts", "director"),
   billController.editPaymentInstructions
 );
 

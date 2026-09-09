@@ -14,6 +14,7 @@ import {
   applySrNoFilter,
   applyKidharJourneyDateRange,
   normalizeQueryValue,
+  normalizeQueryList,
   buildReportResponse,
   appendGrandTotalTaxAmount,
   appendGrandTotalCourierStyle,
@@ -37,7 +38,7 @@ const fetchBills = (filter, sort) =>
 export const getOutstandingBillsReport = async (req, res) => {
   try {
     const { vendor, vendorName } = req.query;
-    const region = normalizeQueryValue(req.query.region);
+    const region = normalizeQueryList(req.query.region);
 
     const filter = {
       ...dateFilled(FIELDS.acctsReceived),
@@ -170,7 +171,7 @@ export const getOutstandingBillsReport = async (req, res) => {
 export const getOutstandingBillsSubtotalReport = async (req, res) => {
   try {
     const { vendor, vendorName } = req.query;
-    const region = normalizeQueryValue(req.query.region);
+    const region = normalizeQueryList(req.query.region);
 
     const filter = {
       ...dateFilled(FIELDS.acctsReceived),
@@ -273,7 +274,7 @@ export const getOutstandingBillsSubtotalReport = async (req, res) => {
 // 1. Invoices at Site
 export const getInvoicesReceivedAtSite = async (req, res) => {
   try {
-    const region = normalizeQueryValue(req.query.region);
+    const region = normalizeQueryList(req.query.region);
     const filter = {
       ...dateFilled(FIELDS.taxInvRecdAtSite),
       ...dateBlank(FIELDS.pimoDispatch),
@@ -317,7 +318,7 @@ export const getInvoicesReceivedAtSite = async (req, res) => {
 // 2. Invoices at PIMO
 export const getInvoicesReceivedAtPIMOMumbai = async (req, res) => {
   try {
-    const region = normalizeQueryValue(req.query.region);
+    const region = normalizeQueryList(req.query.region);
     const filter = {
       ...dateFilled(FIELDS.pimoReceived),
       ...dateBlank(FIELDS.acctsGiven),
@@ -361,7 +362,7 @@ export const getInvoicesReceivedAtPIMOMumbai = async (req, res) => {
 // 3. Invoices with QS Site for Measurement
 export const getInvoicesGivenToQsSite = async (req, res) => {
   try {
-    const region = normalizeQueryValue(req.query.region);
+    const region = normalizeQueryList(req.query.region);
     const filter = {
       ...dateFilled(FIELDS.qsMeasureGiven),
       ...dateBlank(FIELDS.qsMeasureReturn),
@@ -404,7 +405,7 @@ export const getInvoicesGivenToQsSite = async (req, res) => {
 // 4. Invoices with QS Site for Prov COP
 export const getInvoicesAtQSforProvCOP = async (req, res) => {
   try {
-    const region = normalizeQueryValue(req.query.region);
+    const region = normalizeQueryList(req.query.region);
     const filter = {
       ...dateFilled(FIELDS.qsCopGiven),
       ...dateBlank(FIELDS.qsCopReturn),
@@ -447,7 +448,7 @@ export const getInvoicesAtQSforProvCOP = async (req, res) => {
 // 5. Invoices with QS Mumbai for COP
 export const getInvoicesAtQSMumbai = async (req, res) => {
   try {
-    const region = normalizeQueryValue(req.query.region);
+    const region = normalizeQueryList(req.query.region);
     const filter = {
       ...dateFilled(FIELDS.qsMumbaiGiven),
       ...dateBlank(FIELDS.qsMumbaiReturn),
@@ -490,7 +491,7 @@ export const getInvoicesAtQSMumbai = async (req, res) => {
 // 6. Invoices Sent to PIMO Mumbai
 export const getInvoicesCourierToPIMOMumbai = async (req, res) => {
   try {
-    const region = normalizeQueryValue(req.query.region);
+    const region = normalizeQueryList(req.query.region);
     const filter = {
       ...dateFilled(FIELDS.taxInvRecdAtSite),
       ...dateFilled(FIELDS.pimoDispatch),
@@ -504,6 +505,7 @@ export const getInvoicesCourierToPIMOMumbai = async (req, res) => {
     const reportData = appendGrandTotalCourierStyle(
       bills.map((invoice) => ({
         srNo: invoice.srNo,
+        vendorNo: invoice.vendor?.vendorNo || "", // col 6 - Report logics General #3
         vendorName: invoice.vendor?.vendorName || "",
         taxInvNo: invoice.taxInvNo,
         taxInvDate: fmt(invoice.taxInvDate),
@@ -531,7 +533,7 @@ export const getInvoicesCourierToPIMOMumbai = async (req, res) => {
 // 7. Invoices Returned by QS Site after Measurement
 export const getInvoicesReturnedByQsSite = async (req, res) => {
   try {
-    const region = normalizeQueryValue(req.query.region);
+    const region = normalizeQueryList(req.query.region);
     const filter = {
       ...dateFilled(FIELDS.qsMeasureGiven),
       ...dateFilled(FIELDS.qsMeasureReturn),
@@ -544,6 +546,7 @@ export const getInvoicesReturnedByQsSite = async (req, res) => {
     const reportData = appendGrandTotalCourierStyle(
       bills.map((invoice) => ({
         srNo: invoice.srNo,
+        vendorNo: invoice.vendor?.vendorNo || "", // col 6 - Report logics General #3
         vendorName: invoice.vendor?.vendorName || "",
         taxInvNo: invoice.taxInvNo,
         taxInvDate: fmt(invoice.taxInvDate),
@@ -570,7 +573,7 @@ export const getInvoicesReturnedByQsSite = async (req, res) => {
 // 8. Invoices Returned by QS Site after Prov COP
 export const getInvoicesReturnedByQsCOP = async (req, res) => {
   try {
-    const region = normalizeQueryValue(req.query.region);
+    const region = normalizeQueryList(req.query.region);
     const filter = {
       ...dateFilled(FIELDS.qsCopGiven),
       ...dateFilled(FIELDS.qsCopReturn),
@@ -583,6 +586,7 @@ export const getInvoicesReturnedByQsCOP = async (req, res) => {
     const reportData = appendGrandTotalCourierStyle(
       bills.map((invoice) => ({
         srNo: invoice.srNo,
+        vendorNo: invoice.vendor?.vendorNo || "", // col 6 - Report logics General #3
         vendorName: invoice.vendor?.vendorName || "",
         taxInvNo: invoice.taxInvNo,
         taxInvDate: fmt(invoice.taxInvDate),
@@ -609,7 +613,7 @@ export const getInvoicesReturnedByQsCOP = async (req, res) => {
 // 9. Invoices Returned by QS Mumbai after COP
 export const getInvoicesReturnedByQSMumbai = async (req, res) => {
   try {
-    const region = normalizeQueryValue(req.query.region);
+    const region = normalizeQueryList(req.query.region);
     const filter = {
       ...dateFilled(FIELDS.qsMumbaiGiven),
       ...dateFilled(FIELDS.qsMumbaiReturn),
@@ -622,6 +626,7 @@ export const getInvoicesReturnedByQSMumbai = async (req, res) => {
     const reportData = appendGrandTotalCourierStyle(
       bills.map((invoice) => ({
         srNo: invoice.srNo,
+        vendorNo: invoice.vendor?.vendorNo || "", // col 6 - Report logics General #3
         vendorName: invoice.vendor?.vendorName || "",
         taxInvNo: invoice.taxInvNo,
         taxInvDate: fmt(invoice.taxInvDate),
@@ -648,19 +653,25 @@ export const getInvoicesReturnedByQSMumbai = async (req, res) => {
 // 10. Invoices Sent to Accts Team
 export const getInvoicesGivenToAcctsDept = async (req, res) => {
   try {
-    const region = normalizeQueryValue(req.query.region);
+    const region = normalizeQueryList(req.query.region);
+    // Report 10, "Invoices sent to Accts Team". The spec group header for
+    // reports 6-11 is "Column filled | Column FILLED": both col 62 and col 80
+    // must be present. This read dateBlank(acctsGiven), which listed bills NOT
+    // yet sent to Accounts - the opposite of what the report is called.
+    // Selection criteria and sorting are both on col 80, the sending date.
     const filter = {
       ...dateFilled(FIELDS.pimoReceived),
-      ...dateBlank(FIELDS.acctsGiven),
+      ...dateFilled(FIELDS.acctsGiven),
       siteStatus: "accept",
     };
-    applyOptionalDateRange(filter, FIELDS.pimoReceived, req.query);
+    applyOptionalDateRange(filter, FIELDS.acctsGiven, req.query);
     applyRegionFilter(filter, region);
 
-    const bills = await fetchBills(filter, { "pimoMumbai.dateReceived": -1 });
+    const bills = await fetchBills(filter, { "accountsDept.dateGiven": -1 });
     const reportData = appendGrandTotalCourierStyle(
       bills.map((invoice) => ({
         srNo: invoice.srNo,
+        vendorNo: invoice.vendor?.vendorNo || "", // col 6 - Report logics General #3
         vendorName: invoice.vendor?.vendorName || "",
         taxInvNo: invoice.taxInvNo,
         taxInvDate: fmt(invoice.taxInvDate),
@@ -688,7 +699,7 @@ export const getInvoicesGivenToAcctsDept = async (req, res) => {
 // 11. Invoices Paid
 export const getInvoicesPaid = async (req, res) => {
   try {
-    const region = normalizeQueryValue(req.query.region);
+    const region = normalizeQueryList(req.query.region);
     const startDate = normalizeQueryValue(req.query.startDate);
     const endDate = normalizeQueryValue(req.query.endDate);
     const f110Identification = normalizeQueryValue(req.query.f110Identification);
@@ -769,7 +780,7 @@ export const getInvoicesPaid = async (req, res) => {
 // 14. Bill Kidhar Report
 export const getBillKidharReport = async (req, res) => {
   try {
-    const region = normalizeQueryValue(req.query.region);
+    const region = normalizeQueryList(req.query.region);
     const vendorName = normalizeQueryValue(req.query.vendorName);
     const paymentStatus = normalizeQueryValue(req.query.paymentStatus);
     const taxInvNo = normalizeQueryValue(req.query.taxInvNo);
@@ -829,7 +840,7 @@ export const getBillKidharReport = async (req, res) => {
 // 15. Bill Journey Report
 export const getBillJourney = async (req, res) => {
   try {
-    const region = normalizeQueryValue(req.query.region);
+    const region = normalizeQueryList(req.query.region);
     const vendorName = normalizeQueryValue(req.query.vendorName);
     const taxInvNo = normalizeQueryValue(req.query.taxInvNo);
     const srNo = normalizeQueryValue(req.query.srNo);
@@ -1000,7 +1011,7 @@ export const getBillJourney = async (req, res) => {
 // Legacy pending bills
 export const getPendingBillsReport = async (req, res) => {
   try {
-    const region = normalizeQueryValue(req.query.region);
+    const region = normalizeQueryList(req.query.region);
     const filter = {
       ...dateFilled(FIELDS.taxInvRecdAtSite),
       ...dateBlank(FIELDS.paymentDate),

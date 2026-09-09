@@ -4,6 +4,7 @@ import { importBillsFromExcel } from "../utils/csv-import.js";
 import { patchBillsFromExcelFile } from '../utils/csv-patch-extract.js';
 import { insertVendorsFromExcel, updateVendorComplianceFromExcel } from '../utils/vendor-csv-utils.js';
 
+import { primaryRole, isAdminRole } from "../utils/roles.js";
 import mongoose from "mongoose";
 import multer from "multer";
 import path from "path";
@@ -478,11 +479,11 @@ const patchBillsFromExcel = async (req, res) => {
         'accounts': 'Accounts Team',
       };
 
-      teamName = roleToTeam[req.user.role];
+      teamName = roleToTeam[primaryRole(req.user.role)];
     }
 
     // Admin users can bypass team restrictions
-    const isAdmin = req.user && req.user.role === 'admin';
+    const isAdmin = req.user && isAdminRole(req.user.role);
     if (isAdmin) {
       teamName = null; // Allow all fields
     }

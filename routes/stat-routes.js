@@ -12,9 +12,9 @@ router.use(authenticate);
 router.get('/system', statController.getSystemStats);
 
 // Vendor statistics - available to authenticated users with finance role or admin
-router.get('/vendors', authorize(['admin', 'finance']), statController.getVendorStats);
+router.get('/vendors', authorize(['admin', 'accounts', 'director']), statController.getVendorStats);
 
 // Bill statistics over time - available to authenticated users with finance role or admin
-router.get('/bills/time', authorize(['admin', 'finance']), statController.getBillTimeStats);
+router.get('/bills/time', authorize(['admin', 'accounts', 'director']), statController.getBillTimeStats);
 
 export default router; 

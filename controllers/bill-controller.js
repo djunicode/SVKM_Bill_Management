@@ -3,6 +3,17 @@ import {
   buildAmountRangeQuery,
   buildDateRangeQuery,
 } from "../utils/bill-helper.js";
+import { flattenBill } from "../utils/bill-response.js";
+import {
+  tabFilter,
+  homeAndIncomingFilter,
+  sortValueFor,
+} from "../utils/tab-predicates.js";
+import { isAdminRole, primaryRole } from "../utils/roles.js";
+import {
+  duplicateBillQuery,
+  DUPLICATE_BILL_MESSAGE,
+} from "../utils/duplicate-bill.js";
 import VendorMaster from "../models/vendor-master-model.js";
 import RegionMaster from "../models/region-master-model.js";
 import PanStatusMaster from "../models/pan-status-master-model.js";
@@ -300,37 +311,25 @@ const createBill = async (req, res) => {
       }
     }
 
-    // Uniqueness check for vendor, taxInvNo, taxInvDate, region only for specific type of invoice
-    if (
-      resolvedNatureOfWork != "Advance/LC/BG" &&
-      resolvedNatureOfWork != "Direct FI Entry" &&
-      resolvedNatureOfWork != "Proforma Invoice"
-    ) {
-
-      const uniqueQuery = {
-        vendor: vendorDoc._id, // Use vendor ObjectId instead of vendorNo
+    // Vendor + bill no + bill date + bill amount, with five exempt natures and
+    // no check at all while the bill number is blank. See utils/duplicate-bill.js
+    // for the rule as the client wrote it.
+    const uniqueQuery = duplicateBillQuery(
+      {
+        vendor: vendorDoc._id,
         taxInvNo: req.body.taxInvNo,
-        region: req.body.region,
-      };
+        taxInvDate: req.body.taxInvDate,
+        taxInvAmt: req.body.taxInvAmt,
+      },
+      resolvedNatureOfWork
+    );
 
-      // For date comparison, use date range to match same day regardless of time
-      if (req.body.taxInvDate) {
-        const inputDate = new Date(req.body.taxInvDate);
-        const startOfDay = new Date(inputDate.getFullYear(), inputDate.getMonth(), inputDate.getDate(), 0, 0, 0);
-        const endOfDay = new Date(inputDate.getFullYear(), inputDate.getMonth(), inputDate.getDate(), 23, 59, 59, 999);
-
-        uniqueQuery.taxInvDate = {
-          $gte: startOfDay,
-          $lte: endOfDay
-        };
-      }
-
+    if (uniqueQuery) {
       const duplicate = await Bill.findOne(uniqueQuery);
       if (duplicate) {
         return res.status(400).json({
           success: false,
-          message:
-            "A bill with the same vendorNo, taxInvNo, taxInvDate, and region already exists.",
+          message: DUPLICATE_BILL_MESSAGE,
         });
       }
     }
@@ -363,9 +362,16 @@ const createBill = async (req, res) => {
     const bill = new Bill(newBillData);
     await bill.save();
     bill.pimoMumbai.markReceived = role === "3" ? true : false;
+    if (role === "3" && !bill.pimoMumbai.dateReceived) {
+      // A bill raised at PIMO Mumbai never passes through the Incoming tab, so
+      // col 62 would stay blank and the bill would be missing from the
+      // "Invoices at PIMO" report and the PIMO home tab. Stamp it at creation.
+      // (observations General #7, Report logics R105)
+      bill.pimoMumbai.dateReceived = bill.createdAt || new Date();
+    }
     await bill.save();
     // populate the vendor details , fix billId population during bill return
-    const populatedBill = await Bill.findById(bill._id).populate("region")
+    const populatedBill = await Bill.findById(bill._id)
       .populate("currency")
       .populate("natureOfWork")
       .populate({
@@ -375,87 +381,49 @@ const createBill = async (req, res) => {
           { path: "complianceStatus", model: "ComplianceMaster" },
         ],
       });
-    res.status(201).json({ success: true, bill: populatedBill });
+    // Flatten vendor onto the bill so a checklist printed immediately after
+    // saving can read vendorNo/vendorName/gstNumber/panStatus/compliance206AB,
+    // as it can from the dashboard list endpoints. The nested `vendor` is kept
+    // for clients that already read through it. (observations C-01, C-02)
+    res
+      .status(201)
+      .json({ success: true, bill: flattenBill(populatedBill, { keepVendor: true }) });
   } catch (error) {
     res.status(400).json({ message: error.message });
   }
 };
 
+/**
+ * The legacy list endpoint, GET /bill.
+ *
+ * It carried its own hand-written copy of the Home-tab rules for four teams,
+ * inline and drifted: Site keyed on col 62 being blank (which also matches
+ * bills already rejected or dispatched), Trustee ORed paymentDate against
+ * accountsDept.status, and PIMO's copy had already diverged from the version in
+ * getFilteredBills. Two teams (QS via team_name only, Accounts not at all) were
+ * handled inconsistently between the team_name branch and the role fallback.
+ *
+ * Tab membership now comes from utils/tab-predicates.js, the single register
+ * used by Home, Incoming and Forwarded, so this endpoint cannot drift again.
+ */
 const getBills = async (req, res) => {
   try {
     const { team_name } = req.query;
-    let filter = req.user.role.includes("admin")
+
+    // team_name wins when supplied; otherwise fall back to the caller's own
+    // team. primaryRole() prefers a non-admin role so a user who also holds
+    // admin still sees their own team's tab.
+    const role = team_name || primaryRole(req.user.role);
+
+    const filter = isAdminRole(req.user.role)
       ? {}
       : { region: { $in: req.user.region } };
 
-    // Apply team-specific filters if team_name is provided
-    if (team_name) {
-      if (team_name === "qs_site") {
-        // QS Team - Home Tab Logic
-        filter = {
-          ...filter,
-          $and: [
-            { "pimoMumbai.dateReturnedFromQs": null },
-            {
-              $or: [
-                { "qsInspection.dateGiven": { $ne: null } },
-                { "qsCOP.dateGiven": { $ne: null } },
-                { "qsMumbai.dateGiven": { $ne: null } }
-              ]
-            }
-          ]
-        };
-      } else if (team_name === "trustees" || team_name === "director") {
-        // Trustees/Director Team - Home Tab Logic
-        filter = {
-          ...filter,
-          siteStatus: { $in: ["hold", "accept"] },
-          $or: [
-            { "accountsDept.paymentDate": null },
-            { "accountsDept.status": { $ne: "Paid" } }
-          ]
-        };
-      } else if (team_name === "site_officer") {
-        // Site Officer - Home Tab Logic
-        filter = {
-          ...filter,
-          "pimoMumbai.dateReceived": null
-        };
-      } else if (team_name === "site_pimo") {
-        // PIMO - Home Tab Logic
-        filter = {
-          ...filter,
-          "pimoMumbai.dateReceived": { $ne: null },
-          "accountsDept.dateReceived": null
-        };
-      }
-    } else {
-      // Fallback if team_name is not provided but we have req.user.role
-      if (req.user.role.includes("site_officer")) {
-        filter = {
-          ...filter,
-          "pimoMumbai.dateReceived": null
-        };
-      } else if (req.user.role.includes("site_pimo")) {
-        filter = {
-          ...filter,
-          "pimoMumbai.dateReceived": { $ne: null },
-          "accountsDept.dateReceived": null
-        };
-      } else if (req.user.role.includes("director")) {
-        filter = {
-          ...filter,
-          siteStatus: { $in: ["hold", "accept"] },
-          $or: [
-            { "accountsDept.paymentDate": null },
-            { "accountsDept.status": { $ne: "Paid" } }
-          ]
-        };
-      }
-    }
+    // An admin with no team_name, or an unrecognised team, sees everything in
+    // scope rather than an arbitrary team's tab.
+    Object.assign(filter, tabFilter(role, "home") || {});
 
     const bills = await Bill.find(filter)
-      .populate("region")
       .populate("currency")
       .populate("natureOfWork")
       .populate({
@@ -464,37 +432,9 @@ const getBills = async (req, res) => {
           { path: "PANStatus", model: "PanStatusMaster" },
           { path: "complianceStatus", model: "ComplianceMaster" },
         ],
-      }); // Populate vendor with nested PAN status and compliance
-    // Map region, currency, and natureOfWork to their names
-    const mappedBills = bills.map((bill) => {
-      const billObj = bill.toObject();
-      billObj.region = Array.isArray(billObj.region)
-        ? billObj.region.map((r) => r?.name || r)
-        : billObj.region;
-      billObj.currency = billObj.currency?.currency || billObj.currency || null;
-      billObj.natureOfWork =
-        billObj.natureOfWork?.natureOfWork || billObj.natureOfWork || null;
+      });
 
-      // Overwrite vendor fields directly from populated vendor
-      if (billObj.vendor && typeof billObj.vendor === "object") {
-        billObj.vendorNo = billObj.vendor.vendorNo;
-        billObj.vendorName = billObj.vendor.vendorName;
-        billObj.PAN = billObj.vendor.PAN;
-        billObj.gstNumber = billObj.vendor.GSTNumber;
-
-        // Get compliance and PAN status from populated vendor references
-        billObj.compliance206AB =
-          billObj.vendor.complianceStatus?.compliance206AB ||
-          billObj.vendor.complianceStatus ||
-          null;
-        billObj.panStatus =
-          billObj.vendor.PANStatus?.name || billObj.vendor.PANStatus || null;
-      }
-      // Remove the vendor object itself
-      delete billObj.vendor;
-      return billObj;
-    });
-    res.status(200).json(mappedBills);
+    res.status(200).json(bills.map((bill) => flattenBill(bill)));
   } catch (error) {
     res.status(400).json({ message: error.message });
   }
@@ -573,7 +513,6 @@ const getBill = async (req, res) => {
 
 
     bill = await Bill.findById(req.params.id)
-      .populate("region")
       .populate("currency")
       .populate("natureOfWork")
       .populate({
@@ -916,10 +855,26 @@ const patchBill = async (req, res) => {
     // Handle nested objects using DOT NOTATION to prevent erasing sibling fields
     // Instead of setting { qsInspection: { dateGiven: value } } which replaces the whole object,
     // we use { "qsInspection.dateGiven": value } which only updates that specific field
+    //
+    // A body may carry BOTH shapes for the same field: the grid's pencil edit
+    // sends each edited cell as "accountsDept.f110Identification" and, when a
+    // payment date is among them, also sends a whole `accountsDept` object
+    // built from the row as it was FETCHED. This loop used to run second and
+    // win, so every other Accounts field the user had just typed - F110, Hard
+    // Copy, Accts Identification, both Remarks - was written back at its old
+    // value the moment a payment date was saved alongside it (observations,
+    // Pencil Edit R8-R12). An explicit dot-notation key is the more specific
+    // instruction, so it now takes precedence.
     schemaFields.forEach((path) => {
       const pathParts = path.split(".");
       if (pathParts.length > 1) {
         const topLevel = pathParts[0];
+
+        // Already set explicitly as "parent.child" - do not overwrite it.
+        if (Object.prototype.hasOwnProperty.call(updates, path)) {
+          processedFields.add(topLevel);
+          return;
+        }
 
         // If the top-level field is in the request body and is an object
         if (req.body[topLevel] && typeof req.body[topLevel] === "object") {
@@ -985,49 +940,34 @@ const patchBill = async (req, res) => {
         resolvedNatureOfWork = nowDoc.natureOfWork;
       }
     }
-    let uniqueQuery = {};
-    if (
-      resolvedNatureOfWork != "Advance/LC/BG" &&
-      resolvedNatureOfWork != "Direct FI Entry" &&
-      resolvedNatureOfWork != "Proforma Invoice"
-    ) {
-      // Uniqueness check for vendor, taxInvNo, taxInvDate, region (ignore self)
-      uniqueQuery = {
-        vendor:
-          updates.vendor !== undefined ? updates.vendor : existingBill.vendor,
-        taxInvNo:
-          req.body.taxInvNo !== undefined
-            ? req.body.taxInvNo
-            : existingBill.taxInvNo,
-        region:
-          req.body.region !== undefined ? req.body.region : existingBill.region,
-        _id: { $ne: existingBill._id },
-      };
-    }
+    // The same rule as createBill, from the same module, ignoring this bill.
+    //
+    // The old copy here keyed on a bill number that is blank on every Advance,
+    // Direct FI and Hold/Ret row, so two such bills for one vendor matched each
+    // other on null === null and the pencil edit refused to save anything at
+    // all (observations T-03, T-06).
+    const pick = (field) =>
+      req.body[field] !== undefined ? req.body[field] : existingBill[field];
 
-    // For date comparison, use date range to match same day regardless of time
-    const taxInvDate = req.body.taxInvDate !== undefined ? req.body.taxInvDate : existingBill.taxInvDate;
-    if (taxInvDate && Object.keys(uniqueQuery).length > 0) {
-      const inputDate = new Date(taxInvDate);
-      const startOfDay = new Date(inputDate.getFullYear(), inputDate.getMonth(), inputDate.getDate(), 0, 0, 0);
-      const endOfDay = new Date(inputDate.getFullYear(), inputDate.getMonth(), inputDate.getDate(), 23, 59, 59, 999);
+    const uniqueQuery = duplicateBillQuery(
+      {
+        vendor: updates.vendor !== undefined ? updates.vendor : existingBill.vendor,
+        taxInvNo: pick("taxInvNo"),
+        taxInvDate: pick("taxInvDate"),
+        taxInvAmt: pick("taxInvAmt"),
+      },
+      resolvedNatureOfWork,
+      { excludeId: existingBill._id }
+    );
 
-      uniqueQuery.taxInvDate = {
-        $gte: startOfDay,
-        $lte: endOfDay
-      };
-    }
-
-    let duplicate = null;
-    if (Object.keys(uniqueQuery).length > 0) {
-      duplicate = await Bill.findOne(uniqueQuery);
-    }
-    if (duplicate) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "A bill with the same vendor, taxInvNo, taxInvDate, and region already exists.",
-      });
+    if (uniqueQuery) {
+      const duplicate = await Bill.findOne(uniqueQuery);
+      if (duplicate) {
+        return res.status(400).json({
+          success: false,
+          message: DUPLICATE_BILL_MESSAGE,
+        });
+      }
     }
 
     // Only update the bill if there are changes
@@ -1047,7 +987,6 @@ const patchBill = async (req, res) => {
       { $set: updates },
       { new: true, runValidators: false }
     )
-      .populate("region")
       .populate("currency")
       .populate("natureOfWork")
       .populate({
@@ -1463,7 +1402,6 @@ export const getBillBySrNo = async (req, res) => {
         .json({ message: "Invalid srNo format. Must be 7 digits." });
     }
     const bill = await Bill.findOne({ srNo })
-      .populate("region")
       .populate("currency")
       .populate("natureOfWork")
       .populate({
@@ -1537,7 +1475,10 @@ const editPaymentInstructions = async (req, res) => {
       bill.accountsDept.f110Identification = f110Identification;
     if (paymentDate !== undefined) {
       bill.accountsDept.paymentDate = paymentDate;
-      bill.accountsDept.status = 'Paid';
+      // Clearing the payment date must not leave the bill marked Paid. An
+      // explicit null is how the grid removes a date, and it used to set the
+      // status to Paid on the way through.
+      bill.accountsDept.status = paymentDate ? "Paid" : "Unpaid";
     }
     if (paymentAmt !== undefined)
       bill.accountsDept.paymentAmt = paymentAmt;
@@ -1696,12 +1637,35 @@ const accountsPaymentReject = async (req, res) => {
       });
     }
 
-    if (billFound.accountsDept && billFound.accountsDept.paymentDate) {
-      billFound.accountsDept.paymentDate = null;
+    /*
+     * Rejecting a payment must return the bill to the SITE team's HOME tab.
+     *
+     * Clearing the payment date alone left the bill wherever it was - which is
+     * why the client saw it land on Site's FORWARDED tab instead. Site home is
+     * "col 61 blank, status Hold, count 1", so the dispatch and receipt dates
+     * have to be cleared as well. (observations, Teamwise Accounts-4)
+     *
+     * The old guard `if (accountsDept.status)` also skipped rows whose status
+     * was already blank, which is exactly the set that needed fixing (T-02).
+     */
+    if (billFound.accountsDept) {
+      billFound.accountsDept.paymentDate = null; // col 89
+      billFound.accountsDept.status = "Unpaid"; // col 93
+      billFound.accountsDept.dateGiven = null; // col 80
+      billFound.accountsDept.givenBy = null; // col 81
+      billFound.accountsDept.dateReceived = null; // col 82
+      billFound.accountsDept.receivedBy = null; // col 82A
+      billFound.accountsDept.markReceived = false;
     }
-    if (billFound.accountsDept && billFound.accountsDept.status) {
-      billFound.accountsDept.status = "Unpaid";
+    if (billFound.pimoMumbai) {
+      billFound.pimoMumbai.dateGiven = null; // col 61
+      billFound.pimoMumbai.namePIMO = null; // col 61A
+      billFound.pimoMumbai.dateReceived = null; // col 62
+      billFound.pimoMumbai.receivedBy = null; // col 63
+      billFound.pimoMumbai.markReceived = false;
     }
+    billFound.siteStatus = "hold";
+    billFound.currentCount = 1;
 
     await billFound.save();
 
@@ -1721,88 +1685,24 @@ const accountsPaymentReject = async (req, res) => {
 };
 
 const getFilteredBills = async (req, res) => {
-  const { role } = req.query;
+  const { role, tab } = req.query;
   try {
-    let filter = { region: { $in: req.user.region } };
-
-    switch (role) {
-      case "site_officer":
-        filter = {
-          ...filter,
-          "pimoMumbai.dateReceived": null,
-          siteStatus: "hold",
-          currentCount: 1
-        };
-        break;
-
-      case "site_pimo":
-        filter = {
-          ...filter,
-          currentCount: 3,
-          $or: [
-            {
-              "pimoMumbai.dateGiven": { $ne: null },
-              "accountsDept.dateReceived": null
-            },
-            {
-              siteStatus: "accept",
-              "accountsDept.dateReceived": null
-            }
-          ]
-        };
-        break;
-
-      case "accounts":
-        filter = {
-          ...filter,
-          "accountsDept.paymentDate": null,
-          "accountsDept.dateGiven": { $ne: null },
-          currentCount: 5
-        };
-        break;
-
-      case "director":
-        filter = {
-          ...filter,
-          "approvalDetails.directorApproval.dateGiven": { $ne: null },
-          "pimoMumbai.dateReturnedFromDirector": null,
-          siteStatus: { $in: ["accept", "hold"] },
-          "accountsDept.paymentDate": null
-        };
-        break;
-
-      case "qs_site":
-        filter = {
-          ...filter,
-          $and: [
-            { "pimoMumbai.dateReturnedFromQs": null },
-            {
-              $or: [
-                { "qsInspection.dateGiven": { $ne: null } },
-                { "qsCOP.dateGiven": { $ne: null } },
-                { "qsMumbai.dateGiven": { $ne: null } }
-              ]
-            }
-          ],
-        };
-        break;
+    // Tab membership lives in utils/tab-predicates.js, transcribed from the
+    // spec matrix, so home/incoming/forwarded are defined in one place rather
+    // than inline in each controller.
+    const scope = tab ? tabFilter(role, tab) : homeAndIncomingFilter(role);
+    if (tab && !scope) {
+      return res.status(400).json({
+        message: `Role '${role}' has no '${tab}' tab`,
+      });
     }
 
-    let sortOptions = { billDate: -1, srNo: -1 };
-
-    if (role === "site_officer" || role === "director") {
-      sortOptions = { taxInvRecdAtSite: -1, srNo: -1 };
-    } else if (role === "qs_site") {
-      sortOptions = { "qsInspection.dateGiven": -1, srNo: -1 };
-    } else if (role === "site_pimo") {
-      sortOptions = { "pimoMumbai.dateReceived": -1, srNo: -1 };
-    } else if (role === "accounts") {
-      sortOptions = { "accountsDept.dateReceived": -1, srNo: -1 };
-    }
+    const filter = {
+      region: { $in: req.user.region },
+      ...(scope || {}),
+    };
 
     const bills = await Bill.find(filter)
-      .sort(sortOptions)
-      .populate("region")
       .populate("currency")
       .populate("natureOfWork")
       .populate({
@@ -1813,65 +1713,18 @@ const getFilteredBills = async (req, res) => {
         ],
       });
 
-    const mappedBills = bills.map((bill) => {
-      const billObj = bill.toObject();
-      billObj.region = Array.isArray(billObj.region)
-        ? billObj.region.map((r) => r?.name || r)
-        : billObj.region;
-      billObj.currency = billObj.currency?.currency || billObj.currency || null;
-      billObj.natureOfWork =
-        billObj.natureOfWork?.natureOfWork || billObj.natureOfWork || null;
+    const mappedBills = bills.map((bill) => flattenBill(bill));
 
-      if (billObj.vendor && typeof billObj.vendor === "object") {
-        billObj.vendorNo = billObj.vendor.vendorNo;
-        billObj.vendorName = billObj.vendor.vendorName;
-        billObj.PAN = billObj.vendor.PAN;
-        billObj.gstNumber = billObj.vendor.GSTNumber;
-
-        billObj.compliance206AB =
-          billObj.vendor.complianceStatus?.compliance206AB ||
-          billObj.vendor.complianceStatus ||
-          null;
-        billObj.panStatus =
-          billObj.vendor.PANStatus?.name || billObj.vendor.PANStatus || null;
-      }
-      delete billObj.vendor;
-      return billObj;
-    });
-
-    // Custom sorting in JS to truncate time, ensuring srNo tiebreaker works correctly for bills on the same day.
+    // Sorted here rather than in mongo so that same-day bills fall back to
+    // Sr no, and so QS can use its 35 -> 40 -> 64 fallback.
+    const sortTab = tab || "home";
     mappedBills.sort((a, b) => {
-      let aDateVal, bDateVal;
-      if (role === "site_officer" || role === "director") {
-        aDateVal = a.taxInvRecdAtSite;
-        bDateVal = b.taxInvRecdAtSite;
-      } else if (role === "qs_site") {
-        aDateVal = a.qsInspection?.dateGiven;
-        bDateVal = b.qsInspection?.dateGiven;
-      } else if (role === "site_pimo") {
-        aDateVal = a.pimoMumbai?.dateReceived;
-        bDateVal = b.pimoMumbai?.dateReceived;
-      } else if (role === "accounts") {
-        aDateVal = a.accountsDept?.dateReceived;
-        bDateVal = b.accountsDept?.dateReceived;
-      } else {
-        aDateVal = a.billDate;
-        bDateVal = b.billDate;
-      }
-
-      // Truncate times for accurate "same day" comparison
-      const dateA = aDateVal ? new Date(new Date(aDateVal).setHours(0, 0, 0, 0)).getTime() : 0;
-      const dateB = bDateVal ? new Date(new Date(bDateVal).setHours(0, 0, 0, 0)).getTime() : 0;
-
-      if (dateA !== dateB) {
-        return dateB - dateA; // Descending date
-      }
-
-      // Tiebreaker: srNo descending
-      const aSrNo = a.srNo ? String(a.srNo) : "";
-      const bSrNo = b.srNo ? String(b.srNo) : "";
-      
-      return bSrNo.localeCompare(aSrNo);
+      const av = sortValueFor(a, role, sortTab);
+      const bv = sortValueFor(b, role, sortTab);
+      const da = av ? new Date(av).setHours(0, 0, 0, 0) : 0;
+      const db = bv ? new Date(bv).setHours(0, 0, 0, 0) : 0;
+      if (da !== db) return db - da; // latest first
+      return String(b.srNo || "").localeCompare(String(a.srNo || ""));
     });
 
     res.status(200).json(mappedBills);
@@ -1880,14 +1733,6 @@ const getFilteredBills = async (req, res) => {
   }
 };
 
-/**
- * Delete specific date fields based on teamName and sendTo parameters
- * This API allows teams to clear specific dates when a bill needs to be returned or marked as not received
- * 
- * @param {string} teamName - The team performing the action (Site Team, QS Team, PIMO Team, Accounts Team)
- * @param {string} sendTo - The destination/action field to clear
- * @param {string|string[]} billId - Single bill ID or array of bill IDs to update
- */
 const deleteDate = async (req, res) => {
   try {
     const { teamName, sendTo, billId } = req.body;
@@ -1913,60 +1758,73 @@ const deleteDate = async (req, res) => {
       }
     }
 
-    // Define the mapping of teamName + sendTo to date fields to clear
-    // Based on the workflow:
-    // 📌 Site Team mappings
-    // 📌 QS Team mappings
-    // 📌 PIMO Team mappings
-    // 📌 Accounts Team mappings
-    // Note: Only date fields are cleared, name fields are preserved
+    // What each send-to wrote, so removing a date can undo exactly that.
+    //
+    // Every entry mirrors one branch of changeBatchWorkflowState. Column
+    // numbers are from the Field entry register. The date and its paired NAME
+    // column are cleared together: send-to writes both, so leaving the name
+    // behind left a bill claiming it had been handed to someone on no date.
+    //
+    // Three entries were previously pointing at the wrong column, which is why
+    // "remove date is not implemented for 44A / 66" (observations D-02, D-03)
+    // and why undoing a return to PIMO wiped col 64 instead:
+    //
+    //   Site Team / QS Measure     cleared qsMeasurementCheck.dateGiven,
+    //                              but the send writes qsInspection (col 35)
+    //   QS Team  / QS for Prov COP cleared col 66, but that send writes col 44A
+    //   QS Team  / QS Mumbai to PIMO cleared col 64, but that send writes col 66
     const dateFieldMappings = {
-      // Site Team mappings
+      // Site Team - the sends in the site_team branch
       "Site Team": {
-        "Quality Engineer": { field: "qualityEngineer.dateGiven", additionalFields: [] },
-        "QS Measure": { field: "qsMeasurementCheck.dateGiven", additionalFields: [] },
-        "QS for Prov COP": { field: "qsCOP.dateGiven", additionalFields: [] },
-        "Site Engineer": { field: "siteEngineer.dateGiven", additionalFields: [] },
-        "Site Architect": { field: "architect.dateGiven", additionalFields: [] },
-        "Site Incharge": { field: "siteIncharge.dateGiven", additionalFields: [] },
-        "MIGO Team": { field: "migoDetails.dateGiven", additionalFields: [] },
-        "Migo done by": { field: "migoDetails.doneBy", additionalFields: [] },
-        "Ret Site aft MIGO": { field: "invReturnedToSite", additionalFields: [] },
-        "Site Dispatch": { field: "siteOfficeDispatch.dateGiven", additionalFields: [] },
-        "PIMO Team": { field: "pimoMumbai.dateGiven", additionalFields: [] },
+        "Quality Engineer": { fields: ["qualityEngineer.dateGiven", "qualityEngineer.name"] }, // 33, 34
+        "QS Measure": { fields: ["qsInspection.dateGiven", "qsInspection.name"] }, // 35, 36
+        "QS for Prov COP": { fields: ["qsCOP.dateGiven", "qsCOP.name"] }, // 40, 41
+        "Site Engineer": { fields: ["siteEngineer.dateGiven", "siteEngineer.name"] }, // 51, 52
+        "Site Architect": { fields: ["architect.dateGiven", "architect.name"] }, // 53, 54
+        "Site Incharge": { fields: ["siteIncharge.dateGiven", "siteIncharge.name"] }, // 55, 56
+        "MIGO Team": { fields: ["migoDetails.dateGiven", "migoDetails.name"] }, // 45, 45A
+        "Migo done by": { fields: ["migoDetails.doneBy"] }, // 49
+        "Ret Site aft MIGO": { fields: ["invReturnedToSite", "invReturnedToSiteName"] }, // 50, 50A
+        "Site Dispatch": { fields: ["siteOfficeDispatch.dateGiven", "siteOfficeDispatch.name"] }, // 58, 59
+        "PIMO Team": { fields: ["pimoMumbai.dateGiven", "pimoMumbai.namePIMO"] }, // 61, 61A
       },
-      // QS Team mappings
+      // QS Team - the sends in the qs_team branch
       "QS Team": {
-        "QS Measure": { field: "copDetails.dateReturned", additionalFields: [] },
-        "QS for Prov COP": { field: "pimoMumbai.dateReturnedFromQs", additionalFields: [] },
-        "QS Mumbai to PIMO": { field: "qsMumbai.dateGiven", additionalFields: [] },
-      },
-      // PIMO Team mappings
-      "PIMO Team": {
-        "QS Mumbai": { field: "qsMumbai.dateGiven", additionalFields: [] },
-        "IT Team": { field: "itDept.dateGiven", additionalFields: [] },
-        "SES Team": { field: "sesDetails.dateGiven", additionalFields: [] },
-        "Ret by IT Team": { field: "pimoMumbai.dateReceivedFromIT", additionalFields: [] },
-        "Ret by SES Team": { field: "pimoMumbai.dateReturnedFromSES", additionalFields: [] },
-        "Director/Advisor/Trustee": { field: "approvalDetails.directorApproval.dateGiven", additionalFields: [] },
-        "Accounts Team": { field: "accountsDept.dateGiven", additionalFields: [] },
-        "Mark as not received": {
-          field: "pimoMumbai.dateGiven",
-          additionalFields: [
-            "pimoMumbai.dateReceived"
-          ],
-          extraUpdates: { "pimoMumbai.markReceived": false }
+        // "send to Site Team aft COP" - col 44A, which nothing could clear
+        "QS for Prov COP": { fields: ["copDetails.dateReturned", "copDetails.nameReturned"] }, // 44A, 44B
+        // "send to QS for measure" return leg
+        "QS Measure": { fields: ["vendorFinalInv.dateGiven", "vendorFinalInv.name"] }, // 40, 39
+        // "send to Ret to PIMO Team aft COP" - col 66, likewise
+        "QS Mumbai to PIMO": {
+          fields: ["pimoMumbai.dateReturnedFromQs", "pimoMumbai.nameReturnedFromQs"], // 66, 67
         },
       },
-      // Accounts Team mappings
-      "Accounts Team": {
-        "Booking & Checking": { field: "accountsDept.invBookingChecking", additionalFields: [] },
+      // PIMO Team - the sends in the pimo_mumbai branch
+      "PIMO Team": {
+        "QS Mumbai": { fields: ["qsMumbai.dateGiven", "qsMumbai.name"] }, // 64, 65
+        "IT Team": { fields: ["itDept.dateGiven", "itDept.name"] }, // 68, 69
+        "SES Team": { fields: ["sesDetails.dateGiven", "sesDetails.name"] }, // 70, 71
+        "Ret by IT Team": {
+          fields: ["pimoMumbai.dateReceivedFromIT", "pimoMumbai.nameReceivedFromIT"], // 75, 75A
+        },
+        "Ret by SES Team": {
+          fields: ["pimoMumbai.dateReturnedFromSES", "pimoMumbai.nameReturnedFromSES"], // 76, 76A
+        },
+        "Director/Advisor/Trustee": {
+          fields: ["approvalDetails.directorApproval.dateGiven"], // 77
+        },
+        "Accounts Team": { fields: ["accountsDept.dateGiven", "accountsDept.givenBy"] }, // 80, 81
         "Mark as not received": {
-          field: "accountsDept.dateGiven",
-          additionalFields: [
-            "accountsDept.dateReceived"
-          ],
-          extraUpdates: { "accountsDept.markReceived": false }
+          fields: ["pimoMumbai.dateGiven", "pimoMumbai.dateReceived", "pimoMumbai.receivedBy"], // 61, 62, 63
+          extraUpdates: { "pimoMumbai.markReceived": false },
+        },
+      },
+      // Accounts Team
+      "Accounts Team": {
+        "Booking & Checking": { fields: ["accountsDept.invBookingChecking"] }, // 83
+        "Mark as not received": {
+          fields: ["accountsDept.dateGiven", "accountsDept.dateReceived", "accountsDept.receivedBy"], // 80, 82, 82A
+          extraUpdates: { "accountsDept.markReceived": false },
         },
       },
     };
@@ -1989,19 +1847,10 @@ const deleteDate = async (req, res) => {
 
     const mapping = dateFieldMappings[teamName][sendTo];
 
-    // Build the update object
-    const updateFields = {
-      [mapping.field]: null,
-    };
+    const updateFields = {};
+    for (const field of mapping.fields) updateFields[field] = null;
 
-    // Add additional fields to clear
-    if (mapping.additionalFields && mapping.additionalFields.length > 0) {
-      for (const additionalField of mapping.additionalFields) {
-        updateFields[additionalField] = null;
-      }
-    }
-
-    // Add any extra updates (like setting boolean fields)
+    // Boolean flags such as markReceived, which are cleared to false not null.
     if (mapping.extraUpdates) {
       Object.assign(updateFields, mapping.extraUpdates);
     }

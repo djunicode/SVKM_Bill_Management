@@ -2,6 +2,7 @@ import User from '../models/user-model.js';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
+import { isAdminRole } from "../utils/roles.js";
 
 // Register a new user
 export const register = async (req, res) => {
@@ -26,7 +27,7 @@ export const register = async (req, res) => {
     }
     
     // Only admin can create admin users
-    if (role === 'admin' && (!req.user || req.user.role !== 'admin')) {
+    if (role === 'admin' && (!req.user || !isAdminRole(req.user.role))) {
       return res.status(403).json({
         success: false,
         message: "Only administrators can create admin users"
@@ -239,7 +240,7 @@ export const updateUser = async (req, res) => {
     };
     
     // Only allow admin to update role
-    if (req.user.role === 'admin') {
+    if (isAdminRole(req.user.role)) {
       fieldsToUpdate.role = role;
     }
     

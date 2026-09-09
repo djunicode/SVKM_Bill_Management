@@ -3,6 +3,7 @@ import Vendor from '../models/vendor-master-model.js';
 import Compliance from '../models/compliance-master-model.js';
 import User from '../models/user-model.js';
 import RegionMaster from '../models/region-master-model.js';
+import Bill from '../models/bill-model.js';
 // The following models are stubs and should be created in models/ as needed
 // import PanStatus from '../models/pan-status-master-model.js';
 // import Region from '../models/region-master-model.js';
@@ -61,7 +62,10 @@ const masterController = {
   },
   async getVendors(req, res) {
     try {
+      // Vendor no ascending, which is also the order the master download
+      // is specified in (observations, Masters R54 iv)
       const vendors = await Vendor.find()
+        .sort({ vendorNo: 1 })
         .populate('complianceStatus', 'compliance206AB')
         .populate('PANStatus', 'name description');
       
@@ -163,7 +167,7 @@ const masterController = {
   },
   async getCompliances(req, res) {
     try {
-      const compliances = await Compliance.find();
+      const compliances = await Compliance.find().sort({ compliance206AB: 1 });
       res.json(compliances);
     } catch (err) {
       res.status(500).json({ error: err.message });
@@ -198,7 +202,10 @@ const masterController = {
   },
   async getUsers(req, res) {
     try {
-      const users = await User.find();
+      // The schema already marks password select:false, so it was never in the
+      // response; -password is belt and braces. Sorted so the admin list is
+      // stable, like the other masters.
+      const users = await User.find().select('-password').sort({ name: 1 });
       res.json(users);
     } catch (err) {
       res.status(500).json({ error: err.message });
@@ -234,7 +241,7 @@ const masterController = {
   async getPanStatuses(req, res) {
     try {
       const PanStatus = (await import('../models/pan-status-master-model.js')).default;
-      const panStatuses = await PanStatus.find();
+      const panStatuses = await PanStatus.find().sort({ name: 1 });
       res.json(panStatuses);
     } catch (err) {
       res.status(500).json({ error: err.message });
@@ -286,15 +293,53 @@ const masterController = {
     }
   },
 
-  // Update a region
+  /**
+   * Rename a region, and carry the new name to everything that holds it.
+   *
+   * Bill.region and User.region store the region NAME as a string, not a
+   * reference to RegionMaster. Renaming the master alone therefore left every
+   * bill and every user pointing at a name that no longer exists:
+   *
+   *   - the dropdowns read RegionMaster, so they showed the new name while the
+   *     data still held the old one, which is the reported symptom
+   *     (observations, Masters R56);
+   *   - worse, Bill.region validates against RegionMaster, so saving any bill
+   *     in the renamed region then failed outright.
+   *
+   * The rename now cascades. It is three writes rather than one, and there is
+   * no transaction here, so the master is updated LAST: if a cascade fails
+   * part way, the master still names the old region and the data is at worst
+   * partly renamed rather than orphaned entirely.
+   */
   async updateRegion(req, res) {
     try {
       const { id } = req.params;
       const { name } = req.body;
       if (!name) return res.status(400).json({ error: 'Region name is required' });
-      const region = await RegionMaster.findByIdAndUpdate(id, { name: name.toUpperCase() }, { new: true });
-      if (!region) return res.status(404).json({ error: 'Region not found' });
-      res.json(region);
+
+      const newName = name.toUpperCase();
+      const existing = await RegionMaster.findById(id);
+      if (!existing) return res.status(404).json({ error: 'Region not found' });
+
+      const oldName = existing.name;
+      if (oldName === newName) return res.json(existing);
+
+      const [bills, users] = await Promise.all([
+        Bill.updateMany({ region: oldName }, { $set: { region: newName } }),
+        User.updateMany({ region: oldName }, { $set: { 'region.$[el]': newName } }, {
+          arrayFilters: [{ el: oldName }],
+        }),
+      ]);
+
+      existing.name = newName;
+      await existing.save();
+
+      res.json({
+        ...existing.toObject(),
+        renamedFrom: oldName,
+        billsUpdated: bills.modifiedCount,
+        usersUpdated: users.modifiedCount,
+      });
     } catch (err) {
       if (err.code === 11000) {
         res.status(409).json({ error: 'Region already exists' });
@@ -304,12 +349,29 @@ const masterController = {
     }
   },
 
-  // Delete a region
+  /**
+   * Delete a region, but not one still in use.
+   *
+   * Same reasoning as the rename: bills hold the name, so deleting a region
+   * that bills still reference orphans them against the model's own validator.
+   */
   async deleteRegion(req, res) {
     try {
       const { id } = req.params;
-      const region = await RegionMaster.findByIdAndDelete(id);
+      const region = await RegionMaster.findById(id);
       if (!region) return res.status(404).json({ error: 'Region not found' });
+
+      const [bills, users] = await Promise.all([
+        Bill.countDocuments({ region: region.name }),
+        User.countDocuments({ region: region.name }),
+      ]);
+      if (bills > 0 || users > 0) {
+        return res.status(409).json({
+          error: `Region '${region.name}' is still used by ${bills} bill(s) and ${users} user(s). Reassign them first, or rename the region instead.`,
+        });
+      }
+
+      await region.deleteOne();
       res.json({ message: 'Region deleted' });
     } catch (err) {
       res.status(400).json({ error: err.message });
@@ -343,7 +405,7 @@ const masterController = {
   async getNatureOfWorks(req, res) {
     try {
       const NatureOfWork = (await import('../models/nature-of-work-master-model.js')).default;
-      const natureOfWorks = await NatureOfWork.find();
+      const natureOfWorks = await NatureOfWork.find().sort({ natureOfWork: 1 });
       res.json(natureOfWorks);
     } catch (err) {
       res.status(500).json({ error: err.message });
@@ -382,7 +444,8 @@ const masterController = {
   async getCurrencies(req, res) {
     try {
       const Currency = (await import('../models/currency-master-model.js')).default;
-      const currencies = await Currency.find();
+      // Alphabetical, so the dropdown is predictable (observations, Sorting R23)
+      const currencies = await Currency.find().sort({ currency: 1 });
       res.json(currencies);
     } catch (err) {
       res.status(500).json({ error: err.message });

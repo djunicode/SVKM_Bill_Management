@@ -9,6 +9,7 @@ import VendorMaster from "../models/vendor-master-model.js";
 import ComplianceMaster from "../models/compliance-master-model.js";
 import { headerMapping } from './headerMap.js';
 import { parseDate } from './csv-patch.js';
+import { SYSTEM_IMPORT_AUTHOR } from "../constants/fieldFormats.js";
 
 /**
  * Recursively sanitizes all amount fields in an object by removing commas and converting to numbers
@@ -297,7 +298,11 @@ async function createNewBill(billData, masterData) {
   newBillData.amount = newBillData.taxInvAmt || 0;
   newBillData.siteStatus = "hold";
   newBillData.department = newBillData.department || "DEFAULT DEPT";
-  newBillData.taxInvRecdBy = newBillData.taxInvRecdBy || "SYSTEM IMPORT";
+  // Column 2. Was never written, so an imported bill showed a blank author
+  // while "SYSTEM IMPORT" sat in col 25 - the column that records who took
+  // delivery of the invoice at site (observations, General R12).
+  newBillData.createdBy = newBillData.createdBy || SYSTEM_IMPORT_AUTHOR;
+  // col 25 now keeps whatever the sheet supplied, including nothing.
   newBillData.taxInvRecdAtSite = newBillData.taxInvRecdAtSite || new Date();
   newBillData.projectDescription = newBillData.projectDescription || "N/A";
   newBillData.poCreated = newBillData.poCreated || "No";

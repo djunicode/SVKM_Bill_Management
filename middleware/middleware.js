@@ -1,6 +1,7 @@
 import jwt from 'jsonwebtoken';
 import User from '../models/user-model.js';
 import Bill from '../models/bill-model.js';
+import { asRoles, hasAnyRole, isAdminRole, primaryRole, describeRoles } from '../utils/roles.js';
 
 // Role to state permission mapping
 
@@ -20,7 +21,7 @@ export const authMiddleware = (req, res, next) => {
 
 // Admin-only middleware
 export const isAdmin = (req, res, next) => {
-  if (req.user && req.user.role === 'admin') {
+  if (req.user && isAdminRole(req.user.role)) {
     return next();
   }
   return res.status(403).json({ success: false, message: 'Admin access required' });
@@ -65,25 +66,14 @@ export const authenticate = (req, res, next) => {
   try {
     const authHeader = req.headers.authorization;
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      // For testing purposes, if no token, create a basic user object
-      // In production, this should be removed and proper auth enforced
-      if (process.env.NODE_ENV === 'development') {
-        req.user = { name: 'Test User', role: 'admin' };
-        return next();
-      }
       return res.status(401).json({ success: false, message: 'Authentication required' });
     }
 
     const token = authHeader.split(' ')[1];
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your-jwt-secret');
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
     req.user = decoded;
     next();
   } catch (error) {
-    // For testing purposes, if token verification fails, create a basic user object
-    if (process.env.NODE_ENV === 'development') {
-      req.user = { name: 'Test User', role: 'admin' };
-      return next();
-    }
     return res.status(401).json({ success: false, message: 'Invalid token' });
   }
 };
@@ -101,10 +91,12 @@ export const authorize = (...roleArgs) => {
       roles = roleArgs[0];
     }
 
-    if (!roles.includes(req.user.role) && req.user.role !== 'admin') {
-      return res.status(403).json({ 
-        success: false, 
-        message: `User with role '${req.user.role}' not authorized for this action`
+    // req.user.role is an ARRAY (see utils/roles.js). Comparing it as a scalar
+    // rejected every user on every route this guards.
+    if (!hasAnyRole(req.user.role, roles) && !isAdminRole(req.user.role)) {
+      return res.status(403).json({
+        success: false,
+        message: `User with role '${describeRoles(req.user.role)}' not authorized for this action`
       });
     }
 
@@ -121,7 +113,7 @@ export const validateWorkflowTransition = async (req, res, next) => {
     if (!bill) {
       return res.status(404).json({ success: false, message: 'Bill not found' });
     }
-    const userRole = req.user.role;
+    const userRole = primaryRole(req.user.role);
     // Map roles to workflow steps (currentCount)
     const roleStepMap = {
       site_officer: 1,
@@ -143,7 +135,7 @@ export const validateWorkflowTransition = async (req, res, next) => {
       return res.status(403).json({ success: false, message: `Role '${userRole}' is not allowed to perform workflow transitions.` });
     }
     // Admin bypass
-    if (userRole === 'admin') return next();
+    if (isAdminRole(req.user.role)) return next();
     // Forward: user can only forward if their step matches currentCount
     if (action === 'forward' && currentCount !== userStep) {
       return res.status(403).json({ success: false, message: `User with role '${userRole}' cannot forward bill at step ${currentCount}` });
@@ -163,7 +155,7 @@ export const validateWorkflowTransition = async (req, res, next) => {
 // Validate state access middleware
 export const validateStateAccess = (req, res, next) => {
   const { state } = req.params;
-  const userRole = req.user.role;
+  const userRole = primaryRole(req.user.role);
   
   // Define which roles can see which states
   const stateAccessMap = {
@@ -177,7 +169,7 @@ export const validateStateAccess = (req, res, next) => {
   };
   
   // Admin can access all states
-  if (userRole === 'admin') {
+  if (isAdminRole(req.user.role)) {
     return next();
   }
   
@@ -197,10 +189,10 @@ import { teamFieldAccessControl, roleToTeamMap } from '../constants/teamFieldAcc
 
 export const validateTeamFieldAccess = (req, res, next) => {
   try {
-    const userRole = req.user.role;
-    
+    const userRole = primaryRole(req.user.role);
+
     // Admin can update any field
-    if (userRole === 'admin') {
+    if (isAdminRole(req.user.role)) {
       return next();
     }
     

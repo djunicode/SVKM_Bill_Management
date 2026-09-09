@@ -419,8 +419,18 @@ async function processVendorRowData(rowData, rowNumber) {
  * @param {Object} rowData - Original row data
  * @returns {Object} Validation result with valid flag and optional error message
  */
+/**
+ * A pragmatic email test: something, an @, a domain with at least one dot and
+ * a two-letter-or-longer suffix, and no whitespace anywhere.
+ */
+export const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[A-Za-z]{2,}$/;
+
 function validateVendorFields(vendorData, rowNumber, rowData) {
-  const requiredFields = ['vendorNo', 'vendorName', 'PANStatus', 'complianceStatus', 'emailIds', 'phoneNumbers'];
+  // Email and phone are NOT mandatory on import - "When import vendor master,
+  // Email Id and Mobile no not kept as mandatory fields" (observations, Imports
+  // R50). ensureContactFields() supplies the empty default the model needs.
+  // They are still validated when supplied, below.
+  const requiredFields = ['vendorNo', 'vendorName', 'PANStatus', 'complianceStatus'];
   if (!vendorData.PAN && vendorData.vendorName) {
     vendorData.PAN = '';
   }
@@ -437,10 +447,11 @@ function validateVendorFields(vendorData, rowNumber, rowData) {
     };
   }
 
-  //phone Number validation
+  // Phone must be digits only (observations, Imports R49). Blank is allowed.
   if (vendorData.phoneNumbers && vendorData.phoneNumbers.length > 0) {
     for (const phone of vendorData.phoneNumbers) {
       const phoneStr = String(phone).trim();
+      if (phoneStr === '') continue;
 
       if (!/^\d+$/.test(phoneStr)) {
         return {
@@ -451,14 +462,21 @@ function validateVendorFields(vendorData, rowNumber, rowData) {
     }
   }
 
+  // Email validation (observations, Masters R57).
+  //
+  // This tested /^\d+$/ - the digits-only pattern copy-pasted from the phone
+  // check above - while reporting "must contain @ and . in emailID". The test
+  // was therefore exactly inverted: every real address was rejected and a
+  // string of digits was accepted as an email.
   if (vendorData.emailIds && vendorData.emailIds.length > 0) {
     for (const email of vendorData.emailIds) {
-      const emailstr = String(email).trim();
+      const emailStr = String(email).trim();
+      if (emailStr === '') continue; // blank is allowed - it is not mandatory
 
-      if (!/^\d+$/.test(emailstr)) {
+      if (!EMAIL_PATTERN.test(emailStr)) {
         return {
           valid: false,
-          error: `Invalid email id "${emailstr}" : must contain @ and . in emailID.`
+          error: `Invalid email id "${emailStr}": must be a valid email address.`
         };
       }
     }

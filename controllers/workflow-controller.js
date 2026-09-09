@@ -3,6 +3,11 @@ import Bill from "../models/bill-model.js";
 import mongoose from "mongoose";
 import WorkFlowFinal from "../models/workflow-final-model.js";
 import User from "../models/user-model.js";
+import {
+  canActAsWorkflowTeam,
+  workflowTeamsFor,
+  describeRoles,
+} from "../utils/roles.js";
 /* 
 @Krishna
 Fields not covered currently:(Check Logic and update if needed)
@@ -94,13 +99,52 @@ export const changeBatchWorkflowState = async (req, res) => {
     if (req.user) {
       if (!fromId) fromId = req.user.id;
       if (!fromName) fromName = req.user.name;
-      if (!fromRoles) fromRoles = req.user.role;
+      // fromRoles is deliberately NOT defaulted from req.user.role here: that
+      // holds LOGIN roles ("site_pimo"), and the branches below dispatch on
+      // WORKFLOW TEAM names ("pimo_mumbai"). Defaulting it produced a value no
+      // branch could ever match, so a body without a role always fell through
+      // to "No matching workflow transition rule found". workflowTeamsFor()
+      // does the translation below.
     }
 
     const { id: toId, name: toName, role: toRoles } = toUser || {};
 
-    const fromRoleArray = Array.isArray(fromRoles) ? fromRoles : (fromRoles ? [fromRoles] : []);
+    /**
+     * The person performing the action, taken from the VERIFIED token.
+     *
+     * The Field entry register marks columns 32, 49, 63, 67, 74A, 78, 81 and
+     * 82A "Auto - User name": they record who did the thing, not who it went
+     * to, and they are audit columns. fromUser.name arrives in the request
+     * body from a browser cookie, so it is neither reliable nor unforgeable.
+     * The token is both.
+     */
+    const actorName = req.user?.name || fromName;
+
+    let fromRoleArray = Array.isArray(fromRoles) ? fromRoles : (fromRoles ? [fromRoles] : []);
     const toRoleArray = Array.isArray(toRoles) ? toRoles : (toRoles ? [toRoles] : []);
+
+    /*
+     * The sender's team decides which branch below runs, and it arrives in the
+     * REQUEST BODY. Nothing checked it against the caller's own roles, so any
+     * signed-in user could claim to be any team and drive any transition on
+     * any bill - approving on the Trustee's behalf, or sending to Accounts as
+     * PIMO.
+     *
+     * The claim must now match a team the caller actually holds. Admins are
+     * unrestricted, as they are everywhere else. A caller who claims nothing
+     * gets their own team rather than a refusal, which is what the fallback
+     * above was already doing.
+     */
+    if (fromRoleArray.length === 0) {
+      fromRoleArray = workflowTeamsFor(req.user?.role);
+    } else if (!canActAsWorkflowTeam(req.user?.role, fromRoleArray)) {
+      return res.status(403).json({
+        success: false,
+        message:
+          `A user with role '${describeRoles(req.user?.role)}' cannot send as ` +
+          `'${fromRoleArray.join(", ")}'.`,
+      });
+    }
 
     if (
       (!fromId || !fromName || fromRoleArray.length === 0) || // Ensure we have sender details
@@ -126,7 +170,6 @@ export const changeBatchWorkflowState = async (req, res) => {
       try {
         const billFound = await Bill.findById(billId)
           .populate("natureOfWork")
-          .populate("region")
           .populate("currency")
           .populate({
             path: "vendor",
@@ -144,7 +187,8 @@ export const changeBatchWorkflowState = async (req, res) => {
           continue;
         }
 
-        if (billFound.siteStatus === "rejected") {
+        // col 60 values are accept/reject/hold/proforma - "rejected" never matched
+        if (billFound.siteStatus === "reject") {
           results.failed.push({
             billId,
             message: "Bill is already rejected",
@@ -228,12 +272,12 @@ export const changeBatchWorkflowState = async (req, res) => {
             setObj["currentCount"] = 1;
           } else if (toRoleArray.includes("migo_entry")) {
 
-            setObj["migoDetails.dateGiven"] = now;
-            setObj["migoDetails.name"] = fromName;
+            setObj["migoDetails.dateGiven"] = now; // col 45
+            setObj["migoDetails.name"] = toName; // col 45A "Name given-MIGO"
           } else if (toRoleArray.includes("migo_entry_return")) {
 
-            setObj["invReturnedToSite"] = now;
-            setObj["invReturnedToSiteName"] = fromName;
+            setObj["invReturnedToSite"] = now; // col 50
+            setObj["invReturnedToSiteName"] = actorName; // col 50A "Name-ret aft MIGO to Site"
           } else if (toRoleArray.includes("site_engineer")) {
             setObj["siteEngineer.dateGiven"] = now;
             setObj["siteEngineer.name"] = toName;
@@ -300,8 +344,8 @@ export const changeBatchWorkflowState = async (req, res) => {
                   currentCount: 1,
                   maxCount: Math.max(billFound.maxCount, 1),
                   // todo: ask milan amount ka kya scene , coz amount bhejna padega usko
-                  "copDetails.dateReturned": new Date(),
-                  "copDetails.nameReturned": fromName,
+                  "copDetails.dateReturned": new Date(), // col 44A
+                  "copDetails.nameReturned": actorName, // col 44B "Name ret-QS aft Prov COP"
                 },
               },
               { new: true }
@@ -313,8 +357,8 @@ export const changeBatchWorkflowState = async (req, res) => {
                 $set: {
                   currentCount: 1,
                   maxCount: Math.max(billFound.maxCount, 1),
-                  "vendorFinalInv.name": toName,
-                  "vendorFinalInv.dateGiven": new Date(),
+                  "vendorFinalInv.name": actorName, // col 39 "Name ret-QS aft measure"
+                  "vendorFinalInv.dateGiven": new Date(), // col 40
                   // "qsMeasurementCheck.dateGiven": new Date(),
                 },
               },
@@ -327,8 +371,8 @@ export const changeBatchWorkflowState = async (req, res) => {
                 $set: {
                   currentCount: 3,
                   maxCount: Math.max(billFound.maxCount, 3),
-                  "pimoMumbai.dateReturnedFromQs": new Date(),
-                  "pimoMumbai.nameReturnedFromQs": fromName,
+                  "pimoMumbai.dateReturnedFromQs": new Date(), // col 66
+                  "pimoMumbai.nameReturnedFromQs": actorName, // col 67, auto
                 },
               },
               { new: true }
@@ -404,8 +448,8 @@ export const changeBatchWorkflowState = async (req, res) => {
                 $set: {
                   currentCount: 3,
                   maxCount: Math.max(billFound.maxCount, 3),
-                  "sesDetails.dateGiven": now,
-                  "sesDetails.name": fromName,
+                  "sesDetails.dateGiven": now, // col 70
+                  "sesDetails.name": actorName, // col 71 "Name-PIMO for SES"
                 },
               },
               {
@@ -419,8 +463,8 @@ export const changeBatchWorkflowState = async (req, res) => {
                 $set: {
                   currentCount: 3,
                   maxCount: Math.max(billFound.maxCount, 3),
-                  "pimoMumbai.dateReceivedFromIT": now,
-                  "pimoMumbai.nameReceivedFromIT": fromName,
+                  "pimoMumbai.dateReceivedFromIT": now, // col 75
+                  "pimoMumbai.nameReceivedFromIT": actorName, // col 75A
                 },
               },
               {
@@ -434,8 +478,8 @@ export const changeBatchWorkflowState = async (req, res) => {
                 $set: {
                   currentCount: 3,
                   maxCount: Math.max(billFound.maxCount, 3),
-                  "pimoMumbai.dateReturnedFromSES": now,
-                  "pimoMumbai.nameReturnedFromSES": fromName,
+                  "pimoMumbai.dateReturnedFromSES": now, // col 76
+                  "pimoMumbai.nameReturnedFromSES": actorName, // col 76A
                 },
               },
               {
@@ -464,7 +508,11 @@ export const changeBatchWorkflowState = async (req, res) => {
                 $set: {
                   currentCount: 5,
                   maxCount: Math.max(billFound.maxCount, 5),
-                  "accountsDept.dateGiven": now,
+                  "accountsDept.dateGiven": now, // col 80
+                  // col 81 "Name given-PIMO to Accts", specified as
+                  // "Auto - User name". Nothing wrote it, so it was blank on
+                  // every bill ever sent to Accounts.
+                  "accountsDept.givenBy": actorName,
                 },
               },
               {

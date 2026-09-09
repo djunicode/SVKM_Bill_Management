@@ -1,7 +1,12 @@
 import express from "express";
 import excelController from "../controllers/excel-controller.js";
+import { authenticate } from "../middleware/middleware.js";
 
 const router = express.Router();
+
+// These endpoints accept an upload that mass-updates bills and vendor master
+// data. They carried no authentication at all.
+router.use(authenticate);
 
 router.post("/generate-report", excelController.generateReport);
 
