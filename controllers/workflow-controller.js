@@ -120,6 +120,48 @@ export const changeBatchWorkflowState = async (req, res) => {
      */
     const actorName = req.user?.name || fromName;
 
+    /**
+     * What goes into a Send-to name column.
+     *
+     * "In all the fields where names are to be mentioned, currently, either
+     *  name mentioned in 'Send to' is captured or 'login id' of sender. We
+     *  want in this field both should be captured. To (name from send to) -
+     *  by (login id of sender)"   -- 29.09, item 29.
+     *
+     * So "Ravi QS - by Vaishali Ketkar" rather than one or the other. Either
+     * half alone is used when the other is missing, so a column never reads
+     * as a bare separator.
+     */
+    const sentTo = (recipient) => {
+      const to = String(recipient || "").trim();
+      const by = String(actorName || "").trim();
+      if (to && by) return `${to} - by ${by}`;
+      return to || by || "";
+    };
+
+    /*
+     * actorName vs toName - which columns get which.
+     *
+     * The Field entry register gives every name column a source, and it is
+     * the source that decides:
+     *
+     *   "Send-to"            -> sentTo(toName), i.e. "<recipient> - by
+     *                           <sender>". Nineteen columns: 34, 36, 39, 41,
+     *                           44B, 45A, 50A, 52, 54, 56, 59, 61A, 65, 67,
+     *                           69, 71, 75A, 76A and 81.
+     *   "Incoming tab"       -> actorName. Whoever acknowledged receipt.
+     *                           Columns 63 and 82A.
+     *   "Upload/Actions",
+     *   "Entry"              -> actorName. Whoever did the thing.
+     *                           Columns 32, 49, 74A, 78.
+     *
+     * The day-9 audit read "Auto - User name" as covering every name column
+     * and set them all to actorName, which put the SENDER's login name in the
+     * Send-to columns. That is what she reported in items 14 and 15 - "Name
+     * of the person to whom the bill is returned is not captured but user id
+     * of sender is captured" - and it applied to eight columns, not two.
+     */
+
     let fromRoleArray = Array.isArray(fromRoles) ? fromRoles : (fromRoles ? [fromRoles] : []);
     const toRoleArray = Array.isArray(toRoles) ? toRoles : (toRoles ? [toRoles] : []);
 
@@ -256,31 +298,31 @@ export const changeBatchWorkflowState = async (req, res) => {
             } else {
 
               setObj["qualityEngineer.dateGiven"] = now;
-              setObj["qualityEngineer.name"] = toName;
+              setObj["qualityEngineer.name"] = sentTo(toName);
             }
           } else if (toRoleArray.includes("qs_measurement")) {
 
             setObj["qsInspection.dateGiven"] = now;
-            setObj["qsInspection.name"] = toName;
+            setObj["qsInspection.name"] = sentTo(toName);
             setObj["maxCount"] = Math.max(billFound.maxCount, 1);
             setObj["currentCount"] = 1;
           } else if (toRoleArray.includes("qs_cop")) {
 
             setObj["qsCOP.dateGiven"] = now;
-            setObj["qsCOP.name"] = toName;
+            setObj["qsCOP.name"] = sentTo(toName);
             setObj["maxCount"] = Math.max(billFound.maxCount, 1);
             setObj["currentCount"] = 1;
           } else if (toRoleArray.includes("migo_entry")) {
 
             setObj["migoDetails.dateGiven"] = now; // col 45
-            setObj["migoDetails.name"] = toName; // col 45A "Name given-MIGO"
+            setObj["migoDetails.name"] = sentTo(toName); // col 45A
           } else if (toRoleArray.includes("migo_entry_return")) {
 
             setObj["invReturnedToSite"] = now; // col 50
-            setObj["invReturnedToSiteName"] = actorName; // col 50A "Name-ret aft MIGO to Site"
+            setObj["invReturnedToSiteName"] = sentTo(toName); // col 50A
           } else if (toRoleArray.includes("site_engineer")) {
             setObj["siteEngineer.dateGiven"] = now;
-            setObj["siteEngineer.name"] = toName;
+            setObj["siteEngineer.name"] = sentTo(toName);
           } else if (toRoleArray.includes("site_architect")) {
             if (billFound.natureOfWork?.natureOfWork == "Material") {
               results.failed.push({
@@ -290,14 +332,14 @@ export const changeBatchWorkflowState = async (req, res) => {
               continue;
             } else {
               setObj["architect.dateGiven"] = now;
-              setObj["architect.name"] = toName;
+              setObj["architect.name"] = sentTo(toName);
             }
           } else if (toRoleArray.includes("site_incharge")) {
 
             setObj["siteIncharge.dateGiven"] = now;
-            setObj["siteIncharge.name"] = toName;
+            setObj["siteIncharge.name"] = sentTo(toName);
           } else if (toRoleArray.includes("site_dispatch_team")) {
-            setObj["siteOfficeDispatch.name"] = toName;
+            setObj["siteOfficeDispatch.name"] = sentTo(toName);
             setObj["siteOfficeDispatch.dateGiven"] = now;
           }
 
@@ -321,7 +363,7 @@ export const changeBatchWorkflowState = async (req, res) => {
                 currentCount: 3,
                 maxCount: Math.max(billFound.maxCount, 3),
                 "pimoMumbai.dateGiven": now,
-                "pimoMumbai.namePIMO": toName ? toName : "",
+                "pimoMumbai.namePIMO": sentTo(toName), // col 61A
                 siteStatus: "hold",
               },
             },
@@ -345,7 +387,11 @@ export const changeBatchWorkflowState = async (req, res) => {
                   maxCount: Math.max(billFound.maxCount, 1),
                   // todo: ask milan amount ka kya scene , coz amount bhejna padega usko
                   "copDetails.dateReturned": new Date(), // col 44A
-                  "copDetails.nameReturned": actorName, // col 44B "Name ret-QS aft Prov COP"
+                  // col 44B. The register calls this a Send-to column, "from
+                  // 'send to Site Team aft COP'" - it names the person the
+                  // bill goes BACK to, not the QS user returning it. It was
+                  // writing the sender's login name (observation N-25 / item 15).
+                  "copDetails.nameReturned": sentTo(toName),
                 },
               },
               { new: true }
@@ -357,7 +403,10 @@ export const changeBatchWorkflowState = async (req, res) => {
                 $set: {
                   currentCount: 1,
                   maxCount: Math.max(billFound.maxCount, 1),
-                  "vendorFinalInv.name": actorName, // col 39 "Name ret-QS aft measure"
+                  // col 39, "Name ret-QS aft measure". Same as 44B: the
+                  // register marks it Send-to, "from 'Retn to Site Team aft
+                  // measure'" (observation N-25 / item 14).
+                  "vendorFinalInv.name": sentTo(toName),
                   "vendorFinalInv.dateGiven": new Date(), // col 40
                   // "qsMeasurementCheck.dateGiven": new Date(),
                 },
@@ -372,7 +421,10 @@ export const changeBatchWorkflowState = async (req, res) => {
                   currentCount: 3,
                   maxCount: Math.max(billFound.maxCount, 3),
                   "pimoMumbai.dateReturnedFromQs": new Date(), // col 66
-                  "pimoMumbai.nameReturnedFromQs": actorName, // col 67, auto
+                  // col 67, "Name ret-PIMO by QS Mumbai" - Send-to, "from
+                  // 'send to Ret to PIMO Team aft COP'". Grouped with 39 and
+                  // 44B rather than with the genuinely auto-captured columns.
+                  "pimoMumbai.nameReturnedFromQs": sentTo(toName),
                 },
               },
               { new: true }
@@ -400,7 +452,7 @@ export const changeBatchWorkflowState = async (req, res) => {
                   currentCount: 3,
                   maxCount: Math.max(billFound.maxCount, 3),
                   "qsMumbai.dateGiven": now,
-                  "qsMumbai.name": toName,
+                  "qsMumbai.name": sentTo(toName),
                 },
                 $push: {
                   "workflowState.history": {
@@ -424,7 +476,7 @@ export const changeBatchWorkflowState = async (req, res) => {
                   currentCount: 3,
                   maxCount: Math.max(billFound.maxCount, 3),
                   "itDept.dateGiven": now,
-                  "itDept.name": toName,
+                  "itDept.name": sentTo(toName),
                 },
                 //   remove $ push
                 $push: {
@@ -449,7 +501,7 @@ export const changeBatchWorkflowState = async (req, res) => {
                   currentCount: 3,
                   maxCount: Math.max(billFound.maxCount, 3),
                   "sesDetails.dateGiven": now, // col 70
-                  "sesDetails.name": actorName, // col 71 "Name-PIMO for SES"
+                  "sesDetails.name": sentTo(toName), // col 71
                 },
               },
               {
@@ -464,7 +516,7 @@ export const changeBatchWorkflowState = async (req, res) => {
                   currentCount: 3,
                   maxCount: Math.max(billFound.maxCount, 3),
                   "pimoMumbai.dateReceivedFromIT": now, // col 75
-                  "pimoMumbai.nameReceivedFromIT": actorName, // col 75A
+                  "pimoMumbai.nameReceivedFromIT": sentTo(toName), // col 75A
                 },
               },
               {
@@ -479,7 +531,7 @@ export const changeBatchWorkflowState = async (req, res) => {
                   currentCount: 3,
                   maxCount: Math.max(billFound.maxCount, 3),
                   "pimoMumbai.dateReturnedFromSES": now, // col 76
-                  "pimoMumbai.nameReturnedFromSES": actorName, // col 76A
+                  "pimoMumbai.nameReturnedFromSES": sentTo(toName), // col 76A
                 },
               },
               {
@@ -512,7 +564,7 @@ export const changeBatchWorkflowState = async (req, res) => {
                   // col 81 "Name given-PIMO to Accts", specified as
                   // "Auto - User name". Nothing wrote it, so it was blank on
                   // every bill ever sent to Accounts.
-                  "accountsDept.givenBy": actorName,
+                  "accountsDept.givenBy": sentTo(toName), // col 81
                 },
               },
               {

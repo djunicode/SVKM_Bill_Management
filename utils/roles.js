@@ -89,3 +89,23 @@ export const canActAsWorkflowTeam = (userRole, claimedTeam) => {
 };
 
 export { WORKFLOW_TEAM };
+
+/**
+ * The team name a person reads, as distinct from the role key stored on the
+ * user or the workflow team name used for dispatch.
+ *
+ * "Site Team" was renamed to "IMD Site Team" on the front end (observation
+ * N-22); this keeps the printed checklists saying the same thing.
+ */
+export const TEAM_LABEL = {
+  site_officer: "IMD Site Team",
+  qs_site: "QS Team",
+  site_pimo: "PIMO Mumbai Team",
+  pimo_mumbai: "PIMO Mumbai Team",
+  accounts: "Accounts Team",
+  director: "Trustee, Advisor & Director",
+  admin: "Admin",
+};
+
+/** The label for whichever team this user acts as. */
+export const teamLabelFor = (userRole) => TEAM_LABEL[primaryRole(userRole)] || "";

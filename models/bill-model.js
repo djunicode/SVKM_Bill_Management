@@ -14,6 +14,10 @@ const billSchema = new mongoose.Schema(
     },
     srNoOld: { type: Number, auto: true },
     createdBy: { type: String, default: null },
+    // The team the creator belonged to, captured at creation. Printed on the
+    // Bill Journey checklist beside "Created By" (observation N-11). Blank on
+    // bills raised before this field existed.
+    createdByTeam: { type: String, default: null },
     // typeOfInv: {
     //     type: String,
     //     required: true,
@@ -266,10 +270,22 @@ const billSchema = new mongoose.Schema(
       accountsIdentification: { type: String },
       paymentAmt: { type: Number },
       remarksAcctsDept: { type: String },
+      /*
+       * Payment Status, column 93.
+       *
+       * Derived from the payment date rather than set independently:
+       * "we don't need payment status as 'Unpaid'. It should be '-' or 'Paid'
+       *  (when date of payment is filled)" -- 29.09, item 15.
+       *
+       * Nothing is stored until a payment date exists; the grid already
+       * renders an empty value as "-". "Unpaid" stays in the enum only so
+       * that rows written before this change still validate. The pre-save
+       * hook below keeps the two in step and clears the old value.
+       */
       status: {
         type: String,
-        enum: ["Paid", "Unpaid"],
-        default: "Unpaid",
+        enum: ["Paid", "Unpaid", null],
+        default: null,
       },
     },
     // MIRO details for Accounts Team
@@ -335,6 +351,23 @@ billSchema.methods.setImportMode = function (isImport) {
   this._importMode = isImport === true;
 
 };
+
+
+/*
+ * Payment Status follows the payment date, and nothing else.
+ *
+ * This previously forced a blank status to "Unpaid" (observation N-28). The
+ * client has since replaced that rule: a bill shows "-" until it is paid, and
+ * "Unpaid" is not a value the system writes at all (29.09, item 15). Deriving
+ * it here means the column cannot disagree with column 89, whichever route
+ * wrote the date - create, upload, pencil edit or send-to.
+ */
+billSchema.pre("save", function (next) {
+  if (this.accountsDept) {
+    this.accountsDept.status = this.accountsDept.paymentDate ? "Paid" : null;
+  }
+  next();
+});
 
 const Bill = mongoose.model("Bill", billSchema);
 

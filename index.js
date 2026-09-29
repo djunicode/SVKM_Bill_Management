@@ -36,6 +36,7 @@ import worflowRoute from "./routes/workflow-routes.js";
 import masterRoute from "./routes/master-routes.js";
 import sentBillsRoute from "./routes/sentBills-routes.js";
 import kpiRoute from "./routes/kpi-route.js";
+import formRoute from "./routes/form-route.js";
 
 app.use("/auth", authRoute);
 app.use("/bill", billRoute);
@@ -49,6 +50,7 @@ app.use("/master", masterRoute);
 app.use("/api/reports", reportRoutes);
 app.use("/workflow", worflowRoute);
 app.use("/kpi", kpiRoute);
+app.use("/forms", formRoute); // forms repository (29.09, reply Q2)
 
 
 // Swagger docs route

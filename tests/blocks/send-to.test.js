@@ -85,6 +85,15 @@ const reload = (bill) => Bill.findById(bill._id).lean();
 /** The name on the signed token, which the "Auto - User name" columns must use. */
 const actor = (role) => fixtures.users[role].name;
 
+/**
+ * What a Send-to name column should now read.
+ *
+ * "We want in this field both should be captured. To (name from send to) -
+ *  by (login id of sender)"  -- 29.09, item 29. It previously held the
+ *  recipient alone.
+ */
+const sentBy = (recipient, role) => `${recipient} - by ${actor(role)}`;
+
 /* ================================================================== *
  * Name columns
  * ================================================================== */
@@ -100,7 +109,7 @@ describe("send-to writes the right name in the right column", () => {
     assert.equal(res.status, 200);
 
     const after = await reload(bill);
-    assert.equal(after.qsInspection.name, "Ravi QS");
+    assert.equal(after.qsInspection.name, sentBy("Ravi QS", "site_officer")); // col 36
     assert.ok(after.qsInspection.dateGiven, "col 35 must be stamped");
   });
 
@@ -116,158 +125,134 @@ describe("send-to writes the right name in the right column", () => {
     });
 
     const after = await reload(bill);
-    assert.equal(after.migoDetails.name, "MIGO Desk");
+    assert.equal(after.migoDetails.name, sentBy("MIGO Desk", "site_officer")); // col 45A
   });
 
-  test("col 39 Name ret-QS aft measure records the QS user returning it", async () => {
-    // A return column: it must hold whoever sent the bill back, taken from the
-    // token. It used to hold toName, i.e. the recipient.
+  /* ---------------------------------------------------------------- *
+   * Return and hand-off columns.
+   *
+   * These asserted the OPPOSITE until the client corrected us: the day-9
+   * audit read the register's "Auto - User name" as covering every name
+   * column and set eight of them to the sender's login name. The register
+   * actually marks these eight "Send-to", and she reported the consequence
+   * directly - "Name of the person to whom the bill is returned is not
+   * captured but user id of sender is captured" (items 14 and 15).
+   * ---------------------------------------------------------------- */
+  test("col 39 Name ret-QS aft measure records who it is returned TO", async () => {
     const bill = await makeBill({ "qsInspection.dateGiven": D("2026-07-05") });
     await sendTo(bill, {
       asUser: "qs_site",
       fromRole: "qs_team",
       toRole: "measure",
-      toName: "Somebody Else",
+      toName: "Site Desk",
     });
 
     const after = await reload(bill);
-    assert.equal(after.vendorFinalInv.name, actor("qs_site"));
-    assert.notEqual(after.vendorFinalInv.name, "Somebody Else");
+    assert.equal(after.vendorFinalInv.name, sentBy("Site Desk", "qs_site")); // col 39
+    assert.notEqual(after.vendorFinalInv.name, actor("qs_site"),
+      "not the QS user who sent it back");
   });
 
-  test("col 67 Name ret-PIMO by QS Mumbai comes from the token, not the body", async () => {
-    // observations D-07: this column showed sometimes a remark, sometimes a
-    // login ID - whatever had been typed into the send-to box.
-    const bill = await makeBill({ "qsMumbai.dateGiven": D("2026-07-14") });
-    await sendTo(bill, {
-      asUser: "qs_site",
-      fromRole: "qs_team",
-      toRole: "pimo_cop",
-      toName: "please check the measurement sheet",
-    });
-
-    const after = await reload(bill);
-    assert.equal(after.pimoMumbai.nameReturnedFromQs, actor("qs_site"));
-    assert.ok(after.pimoMumbai.dateReturnedFromQs, "col 66 must be stamped");
-  });
-
-  test("col 76A Name ret-PIMO aft SES comes from the token", async () => {
-    // observations D-05.
-    const bill = await makeBill({ "sesDetails.dateGiven": D("2026-07-15"), currentCount: 3 });
-    await sendTo(bill, {
-      asUser: "site_pimo",
-      fromRole: "pimo_mumbai",
-      toRole: "ses_return_team",
-      toName: "1234",
-    });
-
-    const after = await reload(bill);
-    assert.equal(after.pimoMumbai.nameReturnedFromSES, actor("site_pimo"));
-    assert.notEqual(after.pimoMumbai.nameReturnedFromSES, "1234");
-  });
-
-  test("col 75A Name ret-IT Dept aft SES comes from the token", async () => {
-    const bill = await makeBill({ "itDept.dateGiven": D("2026-07-15"), currentCount: 3 });
-    await sendTo(bill, {
-      asUser: "site_pimo",
-      fromRole: "pimo_mumbai",
-      toRole: "it_return_team",
-    });
-
-    const after = await reload(bill);
-    assert.equal(after.pimoMumbai.nameReceivedFromIT, actor("site_pimo"));
-  });
-
-  test("col 44B Name ret-QS aft Prov COP comes from the token", async () => {
+  test("col 44B Name ret-QS aft Prov COP records who it is returned TO", async () => {
     const bill = await makeBill({ "qsCOP.dateGiven": D("2026-07-06") });
     await sendTo(bill, {
       asUser: "qs_site",
       fromRole: "qs_team",
       toRole: "site_cop",
+      toName: "Site Desk",
     });
 
     const after = await reload(bill);
-    assert.equal(after.copDetails.nameReturned, actor("qs_site"));
-    assert.ok(after.copDetails.dateReturned, "col 44A must be stamped");
+    assert.equal(after.copDetails.nameReturned, sentBy("Site Desk", "qs_site")); // col 44B
   });
 
-  test("col 81 Name given-PIMO to Accts is written at all", async () => {
-    // Nothing ever wrote this column, so it was blank on every bill that had
-    // ever been sent to Accounts.
-    const bill = await makeBill({ "pimoMumbai.dateReceived": D("2026-07-12"), currentCount: 3 });
+  test("col 67 Name ret-PIMO by QS Mumbai records who it is returned TO", async () => {
+    const bill = await makeBill({ "qsMumbai.dateGiven": D("2026-07-14") });
     await sendTo(bill, {
-      asUser: "site_pimo",
-      fromRole: "pimo_mumbai",
-      toRole: "accounts_department",
-    });
-
-    const after = await reload(bill);
-    assert.equal(after.accountsDept.givenBy, actor("site_pimo"));
-    assert.ok(after.accountsDept.dateGiven, "col 80 must be stamped");
-  });
-
-  test("col 65 Name-QS Mumbai for COP records who it was given to", async () => {
-    const bill = await makeBill({ "pimoMumbai.dateReceived": D("2026-07-12"), currentCount: 3 });
-    await sendTo(bill, {
-      asUser: "site_pimo",
-      fromRole: "pimo_mumbai",
-      toRole: "qs_mumbai",
-      toName: "QS Mumbai Cell",
-    });
-
-    const after = await reload(bill);
-    assert.equal(after.qsMumbai.name, "QS Mumbai Cell");
-  });
-
-  test("col 71 Name-PIMO for SES records the PIMO user, not the SES team", async () => {
-    const bill = await makeBill({ "pimoMumbai.dateReceived": D("2026-07-12"), currentCount: 3 });
-    await sendTo(bill, {
-      asUser: "site_pimo",
-      fromRole: "pimo_mumbai",
-      toRole: "ses_team",
-      toName: "SES Team",
-    });
-
-    const after = await reload(bill);
-    assert.equal(after.sesDetails.name, actor("site_pimo"));
-  });
-
-  test("col 61A Name given-Site to PIMO records the PIMO recipient", async () => {
-    const bill = await makeBill();
-    await sendTo(bill, {
-      asUser: "site_officer",
-      fromRole: "site_team",
-      toRole: "pimo_mumbai",
+      asUser: "qs_site",
+      fromRole: "qs_team",
+      toRole: "pimo_cop",
       toName: "PIMO Mumbai Desk",
     });
 
     const after = await reload(bill);
-    assert.equal(after.pimoMumbai.namePIMO, "PIMO Mumbai Desk");
-    assert.ok(after.pimoMumbai.dateGiven, "col 61 must be stamped");
-    assert.ok(!after.pimoMumbai.dateReceived, "col 62 stays blank until received");
+    assert.equal(after.pimoMumbai.nameReturnedFromQs, sentBy("PIMO Mumbai Desk", "qs_site")); // col 67
   });
 
-  test("a body that claims someone else's name cannot write an audit column", async () => {
+  test("col 75A and 76A record the team the bill goes back to", async () => {
+    const it = await makeBill({ "itDept.dateGiven": D("2026-07-16") });
+    await sendTo(it, {
+      asUser: "site_pimo", fromRole: "pimo_mumbai",
+      toRole: "it_return_team", toName: "PIMO Desk",
+    });
+    assert.equal((await reload(it)).pimoMumbai.nameReceivedFromIT, sentBy("PIMO Desk", "site_pimo")); // 75A
+
+    const ses = await makeBill({ "sesDetails.dateGiven": D("2026-07-16") });
+    await sendTo(ses, {
+      asUser: "site_pimo", fromRole: "pimo_mumbai",
+      toRole: "ses_return_team", toName: "PIMO Desk",
+    });
+    assert.equal((await reload(ses)).pimoMumbai.nameReturnedFromSES, sentBy("PIMO Desk", "site_pimo")); // 76A
+  });
+
+  test("col 71 Name-PIMO for SES records the SES team it went to", async () => {
+    const bill = await makeBill({ "pimoMumbai.dateReceived": D("2026-07-12"), siteStatus: "accept" });
+    await sendTo(bill, {
+      asUser: "site_pimo", fromRole: "pimo_mumbai",
+      toRole: "ses_team", toName: "SES Desk",
+    });
+    assert.equal((await reload(bill)).sesDetails.name, sentBy("SES Desk", "site_pimo")); // col 71
+  });
+
+  test("col 81 Name given-PIMO to Accts records the Accounts team", async () => {
+    const bill = await makeBill({ "pimoMumbai.dateReceived": D("2026-07-12"), siteStatus: "accept" });
+    await sendTo(bill, {
+      asUser: "site_pimo", fromRole: "pimo_mumbai",
+      toRole: "accounts_department", toName: "Accounts Desk",
+    });
+
+    const after = await reload(bill);
+    assert.equal(after.accountsDept.givenBy, sentBy("Accounts Desk", "site_pimo")); // col 81
+    assert.ok(after.accountsDept.dateGiven, "col 80 must be stamped");
+  });
+
+  test("a Send-to column takes the body's name; the sender's login is not used", async () => {
+    // The distinction the register draws. Send-to columns record the
+    // recipient, so the name in the body is exactly what belongs there - it
+    // is the sender's own name that must NOT appear.
     const bill = await makeBill({ "qsMumbai.dateGiven": D("2026-07-14") });
     const res = await request(app)
       .post("/workflow/changeState")
       .set("Authorization", `Bearer ${tokenFor(fixtures.users.qs_site)}`)
       .send({
-        // A real id, so the workflow record still saves - the point is the NAME.
         fromUser: {
           id: String(fixtures.users.qs_site._id),
-          name: "Managing Trustee",
+          name: actor("qs_site"),
           role: "qs_team",
         },
-        toUser: { id: "", name: "PIMO", role: "pimo_cop" },
+        toUser: { id: "", name: "PIMO Mumbai Desk", role: "pimo_cop" },
         billIds: [String(bill._id)],
         action: "forward",
       });
     assert.equal(res.status, 200);
 
     const after = await reload(bill);
-    assert.equal(after.pimoMumbai.nameReturnedFromQs, actor("qs_site"));
-    assert.notEqual(after.pimoMumbai.nameReturnedFromQs, "Managing Trustee");
+    // Both halves, not one or the other.
+    assert.match(after.pimoMumbai.nameReturnedFromQs, /^PIMO Mumbai Desk - by /);
+    assert.match(after.pimoMumbai.nameReturnedFromQs, new RegExp(actor("qs_site") + "$"));
+  });
+
+  test("columns 63 and 82A are not written by a send at all", async () => {
+    // They belong to the Incoming tab's "mark as received" step, which is why
+    // they keep taking the acknowledging user from the token.
+    const bill = await makeBill({ "pimoMumbai.dateReceived": D("2026-07-12"), siteStatus: "accept" });
+    await sendTo(bill, {
+      asUser: "site_pimo", fromRole: "pimo_mumbai",
+      toRole: "accounts_department", toName: "Accounts Desk",
+    });
+
+    const after = await reload(bill);
+    assert.ok(!after.accountsDept.receivedBy, "col 82A is set on receipt, not on send");
   });
 });
 
@@ -543,5 +528,136 @@ describe("a user can only send as a team they hold", () => {
     assert.equal(res.status, 200);
     const after = await reload(bill);
     assert.ok(after.qsInspection.dateGiven, "col 35 must be stamped");
+  });
+});
+
+/* ================================================================== *
+ * The Trustee can send and unsend (29.09, item 11)
+ * ================================================================== */
+describe("Trustee Send/Unreceive and Unsend", () => {
+  const trusteeBill = () =>
+    makeBill({
+      "pimoMumbai.dateReceived": D("2026-07-12"),
+      siteStatus: "accept",
+      "approvalDetails.directorApproval.dateGiven": D("2026-07-18"),
+    });
+
+  test("Return to PIMO stamps column 78", async () => {
+    const bill = await trusteeBill();
+    const res = await sendTo(bill, {
+      asUser: "director",
+      fromRole: "trustee",
+      toRole: "pimo_mumbai",
+      toName: "PIMO Desk",
+    });
+    assert.equal(res.status, 200, res.text?.slice(0, 200));
+
+    const after = await reload(bill);
+    assert.ok(after.pimoMumbai.dateReturnedFromDirector, "col 78 must be stamped");
+  });
+
+  test("Unsend clears column 78 and nothing else", async () => {
+    const bill = await trusteeBill();
+    await sendTo(bill, {
+      asUser: "director", fromRole: "trustee",
+      toRole: "pimo_mumbai", toName: "PIMO Desk",
+    });
+
+    const res = await request(app)
+      .post("/bill/delete-date")
+      .set("Authorization", `Bearer ${tokenFor(fixtures.users.director)}`)
+      .send({ teamName: "Trustee Team", sendTo: "PIMO Team", billId: [String(bill._id)] });
+    assert.equal(res.status, 200, res.text?.slice(0, 200));
+
+    const after = await reload(bill);
+    assert.equal(after.pimoMumbai.dateReturnedFromDirector, null, "col 78 cleared");
+    assert.ok(after.pimoMumbai.dateReceived, "col 62 must be untouched");
+    assert.equal(after.siteStatus, "accept", "status untouched");
+  });
+
+  test("the label the modal sends also works", async () => {
+    // The Trustee's one option is labelled "Returned to PIMO".
+    const bill = await trusteeBill();
+    await sendTo(bill, {
+      asUser: "director", fromRole: "trustee",
+      toRole: "pimo_mumbai", toName: "PIMO Desk",
+    });
+
+    const res = await request(app)
+      .post("/bill/delete-date")
+      .set("Authorization", `Bearer ${tokenFor(fixtures.users.director)}`)
+      .send({ teamName: "Trustee Team", sendTo: "Returned to PIMO", billId: [String(bill._id)] });
+    assert.equal(res.status, 200);
+    assert.equal((await reload(bill)).pimoMumbai.dateReturnedFromDirector, null);
+  });
+});
+
+/* ================================================================== *
+ * QS "Mark as not received" steps back one receipt (N-18)
+ * ================================================================== */
+describe("QS Mark as not received", () => {
+  const unreceive = (bill) =>
+    request(app)
+      .post("/bill/delete-date")
+      .set("Authorization", `Bearer ${tokenFor(fixtures.users.qs_site)}`)
+      .send({ teamName: "QS Team", sendTo: "Mark as not received", billId: [String(bill._id)] });
+
+  test("with columns 64 and 65 filled, those are the ones cleared", async () => {
+    const bill = await makeBill({
+      "qsCOP.dateGiven": D("2026-07-06"),        // 40
+      "qsCOP.name": "QS Prov COP",               // 41
+      "qsMumbai.dateGiven": D("2026-07-14"),     // 64
+      "qsMumbai.name": "QS Mumbai",              // 65
+    });
+
+    const res = await unreceive(bill);
+    assert.equal(res.status, 200, res.text?.slice(0, 200));
+
+    const after = await reload(bill);
+    assert.equal(after.qsMumbai.dateGiven, null, "col 64 cleared");
+    assert.equal(after.qsMumbai.name, null, "col 65 cleared");
+    assert.ok(after.qsCOP.dateGiven, "col 40 must be left alone");
+    assert.equal(after.qsCOP.name, "QS Prov COP", "col 41 must be left alone");
+  });
+
+  test("with 64 and 65 already blank, it steps back to 40 and 41", async () => {
+    const bill = await makeBill({
+      "qsCOP.dateGiven": D("2026-07-06"),
+      "qsCOP.name": "QS Prov COP",
+    });
+
+    const res = await unreceive(bill);
+    assert.equal(res.status, 200);
+
+    const after = await reload(bill);
+    assert.equal(after.qsCOP.dateGiven, null, "col 40 cleared");
+    assert.equal(after.qsCOP.name, null, "col 41 cleared");
+  });
+
+  test("each bill in a batch is decided on its own", async () => {
+    const atMumbai = await makeBill({
+      "qsCOP.dateGiven": D("2026-07-06"), "qsCOP.name": "QS Prov COP",
+      "qsMumbai.dateGiven": D("2026-07-14"), "qsMumbai.name": "QS Mumbai",
+    });
+    const atProvCop = await makeBill({
+      "qsCOP.dateGiven": D("2026-07-06"), "qsCOP.name": "QS Prov COP",
+    });
+
+    const res = await request(app)
+      .post("/bill/delete-date")
+      .set("Authorization", `Bearer ${tokenFor(fixtures.users.qs_site)}`)
+      .send({
+        teamName: "QS Team",
+        sendTo: "Mark as not received",
+        billId: [String(atMumbai._id), String(atProvCop._id)],
+      });
+    assert.equal(res.status, 200);
+
+    const a = await reload(atMumbai);
+    assert.equal(a.qsMumbai.dateGiven, null);
+    assert.ok(a.qsCOP.dateGiven, "the one at QS Mumbai keeps col 40");
+
+    const b = await reload(atProvCop);
+    assert.equal(b.qsCOP.dateGiven, null, "the other steps back to col 40");
   });
 });

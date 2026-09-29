@@ -4,7 +4,7 @@ import { importBillsFromExcel } from "../utils/csv-import.js";
 import { patchBillsFromExcelFile } from '../utils/csv-patch-extract.js';
 import { insertVendorsFromExcel, updateVendorComplianceFromExcel } from '../utils/vendor-csv-utils.js';
 
-import { primaryRole, isAdminRole } from "../utils/roles.js";
+import { primaryRole, isAdminRole, asRoles } from "../utils/roles.js";
 import mongoose from "mongoose";
 import multer from "multer";
 import path from "path";
@@ -460,8 +460,20 @@ const patchBillsFromExcel = async (req, res) => {
       });
     }
 
-    // Get team from query parameter or user role
-    let teamName = req.query.team;
+    /*
+     * The team decides which columns may be written, and it arrived as a
+     * query parameter the caller supplies - so anyone could pass
+     * ?team=accounts and write the Accounts columns. The claim is now only
+     * honoured when the caller actually holds a role that maps to it;
+     * otherwise their own role decides, exactly as if they had claimed
+     * nothing. Same defect class as the send-to guard.
+     */
+    const heldRoles = asRoles(req.user?.role);
+    const claimed = req.query.team;
+    let teamName =
+      claimed && (heldRoles.includes(claimed) || isAdminRole(req.user?.role))
+        ? claimed
+        : null;
 
     // If no team is specified in the query, determine from user role if available
     if (!teamName && req.user && req.user.role) {
@@ -495,7 +507,10 @@ const patchBillsFromExcel = async (req, res) => {
     fs.writeFileSync(tempFilePath, uploadedFile.buffer);
 
     // Call the patch logic with team name
-    const patchResult = await patchBillsFromExcelFile(tempFilePath, teamName, req.query.team);
+    // The role drives the Home-tab filter; the user drives region scoping and
+    // the wording of the result messages.
+    const patchRole = heldRoles.includes(claimed) ? claimed : primaryRole(req.user?.role);
+    const patchResult = await patchBillsFromExcelFile(tempFilePath, teamName, patchRole, req.user);
 
     if (fs.existsSync(tempFilePath)) {
       fs.unlinkSync(tempFilePath);

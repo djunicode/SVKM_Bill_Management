@@ -18,6 +18,7 @@ import {
   getInvoicesReturnedByQsSite,
   getInvoicesReturnedByQsCOP,
   getInvoicesReturnedByQSMumbai,
+  getVendorDetailsReport,
 } from "../controllers/report-controller.js";
 
 router.use(authenticate);
@@ -126,9 +127,12 @@ router.get(
 );
 
 // 14. Bill Kidhar Report
+// Gated on pimo_mumbai alone, so only users who happened to hold that second
+// PIMO role could open it (24.09, item 7) - and Accounts, who have the button,
+// never could. Same entitlement as Bill Journey now.
 router.get(
   "/bill-kidhar",
-  authorize(["pimo_mumbai", "director", "admin"]),
+  authorize([...PIMO_ROLES, "accounts"]),
   getBillKidharReport
 );
 
@@ -145,5 +149,10 @@ router.get(
   authorize(["admin", "site_officer", "site_pimo", "qs_site", "pimo_mumbai"]),
   getPendingBillsReport
 );
+
+// Vendor Details - every team, per observation N-08. authenticate() at the top
+// of this file still applies; there is no role list because the report is
+// explicitly for all teams.
+router.get("/vendor-details", getVendorDetailsReport);
 
 export default router;

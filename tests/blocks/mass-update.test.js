@@ -13,6 +13,9 @@ import { test, describe, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import request from "supertest";
 import ExcelJS from "exceljs";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 import { startDb, stopDb, clearDb } from "../helpers/db.js";
 
@@ -304,5 +307,213 @@ describe("upload endpoints require a token", () => {
       .set("Authorization", "Bearer not-a-real-token")
       .attach("file", await workbook(["Sr no"], [{ "Sr no": "1" }]), "u.xlsx");
     assert.equal(res.status, 401);
+  });
+});
+
+/* ================================================================== *
+ * Why a row failed (N-14), region scoping (N-15), team claims
+ * ================================================================== */
+describe("the result file says what actually went wrong", () => {
+  const errorFor = (res, srNo) =>
+    (res.body?.data?.errors || res.body?.errors || []).find((e) => String(e.srNo) === String(srNo));
+
+  test("a bill that exists but is on another tab says so", async () => {
+    // It used to report "No bill exists with this Sr no" for a bill that
+    // exists perfectly well - the uploader had no way to tell the two apart.
+    const offTab = await makeBill({
+      srNo: "2627555",
+      "pimoMumbai.dateReceived": new Date("2026-07-12"), // off Site's home tab
+      siteStatus: "accept",
+    });
+
+    const res = await upload("site_officer", TEMPLATE, [
+      { "Sr no": offTab.srNo, "MIGO no": "1000056752" },
+    ]);
+
+    const err = errorFor(res, offTab.srNo);
+    assert.ok(err, "the row must be reported");
+    assert.match(err.error, /not on your team's Home tab/i);
+    assert.doesNotMatch(err.error, /No bill exists/i);
+  });
+
+  test("a genuinely unknown Sr no still says so", async () => {
+    const res = await upload("site_officer", TEMPLATE, [
+      { "Sr no": "9999999", "MIGO no": "1000056752" },
+    ]);
+    const err = errorFor(res, "9999999");
+    assert.match(err.error, /No bill exists/i);
+  });
+
+  test("a refused column is named", async () => {
+    // "Your team is not permitted to update the columns filled on this row"
+    // named neither the column nor the team.
+    const bill = await billFor("qs_site", { srNo: "2627556" });
+
+    const res = await upload("qs_site", TEMPLATE, [
+      { "Sr no": bill.srNo, "MIGO no": "1000056752", "MIGO done by": "Vaishali" },
+    ]);
+
+    const err = errorFor(res, bill.srNo);
+    assert.match(err.error, /not permitted/i);
+    assert.match(err.error, /MIGO no/, "the offending column must be named");
+  });
+
+  test("a bill in another region is refused, and says which", async () => {
+    // observation N-15 - region was not part of the gate at all.
+    const other = await makeBill({
+      srNo: "2627557",
+      region: "INDORE",
+      "pimoMumbai.dateReceived": null,
+      siteStatus: "hold",
+      currentCount: 1,
+    });
+
+    const res = await upload("site_officer", TEMPLATE, [
+      { "Sr no": other.srNo, "MIGO no": "1000056752" },
+    ]);
+
+    const err = errorFor(res, other.srNo);
+    assert.match(err.error, /region/i);
+    const after = await Bill.findById(other._id).lean();
+    assert.equal(after.migoDetails?.no ?? null, null, "nothing may be written");
+  });
+
+  test("a bill in the user's own region still updates", async () => {
+    const mine = await billFor("site_officer", { srNo: "2627558", region: "MUMBAI" });
+    const res = await upload("site_officer", TEMPLATE, [
+      { "Sr no": mine.srNo, "MIGO no": "1000056752" },
+    ]);
+    assert.equal(res.status, 200);
+    const after = await Bill.findById(mine._id).lean();
+    assert.equal(String(after.migoDetails.no), "1000056752");
+  });
+
+  test("claiming another team's allow-list does not grant it", async () => {
+    // ?team= chooses which columns may be written and was taken on trust.
+    const bill = await billFor("qs_site", { srNo: "2627559" });
+
+    const res = await request(app)
+      .post("/excel/patch-bills")
+      .query({ team: "accounts" }) // qs_site user claiming Accounts
+      .set("Authorization", `Bearer ${seed.tokenFor(fixtures.users.qs_site)}`)
+      .attach("file", await workbook(TEMPLATE, [
+        { "Sr no": bill.srNo, "F110": "SV000", "Hard Copy": "Yes" },
+      ]), "patch.xlsx");
+
+    const after = await Bill.findById(bill._id).lean();
+    assert.equal(after.accountsDept?.f110Identification ?? null, null,
+      "an Accounts-only column must not be written by a QS user");
+  });
+});
+
+/* ================================================================== *
+ * Accounts may still update a paid bill's payment columns (S-26)
+ * ================================================================== */
+describe("the Accounts exception for paid bills", () => {
+  const paidBill = (fields = {}) =>
+    makeBill({
+      siteStatus: "accept",
+      "accountsDept.dateGiven": new Date("2026-07-20"),
+      "accountsDept.dateReceived": new Date("2026-07-22"),
+      "accountsDept.paymentDate": new Date("2026-07-25"), // on Forwarded
+      currentCount: 5,
+      ...fields,
+    });
+
+  const errorFor = (res, srNo) =>
+    (res.body?.data?.errors || res.body?.errors || []).find((e) => String(e.srNo) === String(srNo));
+
+  test("the six payment columns are written even though the bill is paid", async () => {
+    const bill = await paidBill({ srNo: "2627600" });
+
+    const res = await upload("accounts", TEMPLATE, [{
+      "Sr no": bill.srNo,
+      "Payment Instructions": "NEFT",
+      "F110": "SV999",
+      "Hard Copy": "Yes",
+      "Accts Identification": "ID-1",
+      "Payment Amt": 12345,
+    }]);
+    assert.equal(res.status, 200, JSON.stringify(res.body).slice(0, 200));
+
+    const after = await Bill.findById(bill._id).lean();
+    assert.equal(after.accountsDept.paymentInstructions, "NEFT");
+    assert.equal(after.accountsDept.f110Identification, "SV999");
+    assert.equal(String(after.accountsDept.hardCopy).toUpperCase(), "YES");
+    assert.equal(after.accountsDept.accountsIdentification, "ID-1");
+    assert.equal(Number(after.accountsDept.paymentAmt), 12345);
+  });
+
+  test("any other column on a paid bill is refused, and named", async () => {
+    const bill = await paidBill({ srNo: "2627601" });
+
+    const res = await upload("accounts", TEMPLATE, [{
+      "Sr no": bill.srNo,
+      "MIRO no": "1000099999",
+    }]);
+
+    const err = errorFor(res, bill.srNo);
+    assert.ok(err, "the row must be reported");
+    assert.match(err.error, /has been paid/i);
+    assert.match(err.error, /MIRO no/);
+
+    const after = await Bill.findById(bill._id).lean();
+    assert.equal(after.miroDetails?.number ?? null, null);
+  });
+
+  test("an unpaid Accounts bill still takes every Accounts column", async () => {
+    const bill = await makeBill({
+      srNo: "2627602",
+      siteStatus: "accept",
+      "accountsDept.dateGiven": new Date("2026-07-20"),
+      "accountsDept.dateReceived": new Date("2026-07-22"),
+      currentCount: 5,
+    });
+
+    const res = await upload("accounts", TEMPLATE, [{
+      "Sr no": bill.srNo, "MIRO no": "1000088888",
+    }]);
+    assert.equal(res.status, 200);
+
+    const after = await Bill.findById(bill._id).lean();
+    assert.equal(String(after.miroDetails.number), "1000088888");
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * 7. Bill import must not guess a region or a vendor (found while
+ *    rehearsing R-07: 108 of the client's mock bills became MUMBAI)
+ * ------------------------------------------------------------------ */
+describe("bill import refuses rows it would otherwise mislabel", () => {
+  const HEADERS = ["Sr No", "Nature of Work", "Region", "Project Description", "Vendor no",
+    "Vendor Name", "Tax Inv no", "Tax Inv Amt", "Tax Inv Dt", "Dt Recd at site"];
+  const row = (over = {}) => ({
+    "Nature of Work": "Materials", Region: "MUMBAI", "Project Description": "P",
+    "Vendor no": 123456, "Vendor Name": "Acme Constructions Pvt Ltd",
+    "Tax Inv no": "INV" + Math.floor(Math.random() * 1e9), "Tax Inv Amt": 1000,
+    "Tax Inv Dt": new Date("2026-08-01"), "Dt Recd at site": new Date("2026-08-02"), ...over,
+  });
+  const importRows = async (rows) => {
+    const { importBillsFromExcel } = await import("../../utils/csv-import.js");
+    const file = path.join(os.tmpdir(), `imp-${Date.now()}-${Math.random()}.xlsx`);
+    fs.writeFileSync(file, await workbook(HEADERS, rows));
+    try { return await importBillsFromExcel(file, [], false); } finally { fs.rmSync(file, { force: true }); }
+  };
+
+  test("a known region and vendor import", async () => {
+    const r = await importRows([row()]);
+    assert.equal(r.inserted, 1, JSON.stringify(r.details?.errors));
+  });
+
+  test("an unknown region fails the row instead of becoming MUMBAI", async () => {
+    const r = await importRows([row({ Region: "ATLANTIS" })]);
+    assert.equal(r.inserted, 0);
+    assert.match(r.details.errors[0].error, /Region "ATLANTIS" is not in the region master/);
+  });
+
+  test("an unknown vendor fails the row instead of pointing at nothing", async () => {
+    const r = await importRows([row({ "Vendor no": 999999, "Vendor Name": "Nobody Ltd" })]);
+    assert.equal(r.inserted, 0);
+    assert.match(r.details.errors[0].error, /not in the vendor master/);
   });
 });

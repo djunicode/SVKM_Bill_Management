@@ -254,3 +254,38 @@ describe("checklist routing: nature of work drives which form prints", () => {
     assert.equal(second.status, 400, "same vendor + tax inv no + date + region must be refused");
   });
 });
+
+/* ================================================================== *
+ * Created By and Team on the Bill Journey checklist (observation N-11)
+ * ================================================================== */
+describe("the checklist can print who raised the bill, and for which team", () => {
+  test("creation records the creator's name and team", async () => {
+    const res = await createBill({}, "site_officer");
+    assert.equal(res.status, 201);
+    assert.equal(res.body.bill.createdBy, "Test site_officer");
+    assert.equal(res.body.bill.createdByTeam, "IMD Site Team");
+  });
+
+  test("each team gets its own label", async () => {
+    const expected = {
+      site_officer: "IMD Site Team",
+      qs_site: "QS Team",
+      site_pimo: "PIMO Mumbai Team",
+      accounts: "Accounts Team",
+      director: "Trustee, Advisor & Director",
+    };
+    for (const [role, label] of Object.entries(expected)) {
+      const res = await createBill({ taxInvNo: `INV-${role}` }, role);
+      assert.equal(res.status, 201, `${role}: ${res.body.message || ""}`);
+      assert.equal(res.body.bill.createdByTeam, label, role);
+    }
+  });
+
+  test("a multi-role user is labelled by their team, not by admin", async () => {
+    // primaryRole() prefers a non-admin role so someone holding both keeps
+    // their team on the printed sheet.
+    const res = await createBill({ taxInvNo: "INV-MULTI" }, "admin");
+    assert.equal(res.status, 201);
+    assert.equal(res.body.bill.createdByTeam, "Admin");
+  });
+});

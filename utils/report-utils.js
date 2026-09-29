@@ -1,10 +1,12 @@
 import VendorMaster from "../models/vendor-master-model.js";
+import { isAdminRole } from "./roles.js";
 
 export const FIELDS = {
   taxInvRecdAtSite: "taxInvRecdAtSite",
   pimoDispatch: "pimoMumbai.dateGiven",
   pimoReceived: "pimoMumbai.dateReceived",
-  qsMeasureGiven: "qsMeasurementCheck.dateGiven",
+  qsGivenForMeasure: "qsInspection.dateGiven", // col 35 - Dt given-QS for measure
+  qsMeasureGiven: "qsMeasurementCheck.dateGiven", // Dt Checked by QS with Measure
   qsMeasureReturn: "vendorFinalInv.dateGiven",
   qsCopGiven: "qsCOP.dateGiven",
   qsCopReturn: "copDetails.dateReturned",
@@ -107,8 +109,51 @@ export const normalizeQueryList = (value) => {
   return [...new Set(raw.map((v) => String(v).trim()).filter(Boolean))];
 };
 
-export const applyRegionFilter = (filter, region) => {
-  const values = normalizeQueryList(region);
+/**
+ * Scope a report to the regions the caller is actually entitled to see.
+ *
+ * This used to apply only what the CLIENT asked for, and nothing else - so a
+ * request with no region parameter returned every region in the system. A Site
+ * or QS user could read the whole organisation's bills from any report
+ * (observation N-01). Every other bill query in the codebase clamps to
+ * `req.user.region`; the reports were the exception.
+ *
+ * Admins, and users holding the "ALL" pseudo-region, are unrestricted. For
+ * everyone else the requested regions are INTERSECTED with their own, so
+ * asking for a region you do not hold returns nothing rather than everything.
+ *
+ * @param {object} filter  the mongo filter being assembled, mutated in place
+ * @param {*}      region  the region(s) requested, from the query string
+ * @param {object} user    req.user - pass it, or the clamp cannot be applied
+ */
+export const applyRegionFilter = (filter, region, user) => {
+  const asked = normalizeQueryList(region);
+
+  const mine = Array.isArray(user?.region)
+    ? user.region.filter(Boolean)
+    : user?.region
+    ? [user.region]
+    : [];
+
+  const unrestricted = isAdminRole(user?.role) || mine.includes("ALL");
+
+  let values;
+  if (unrestricted) {
+    values = asked;
+  } else if (mine.length === 0) {
+    // A non-admin with no regions is entitled to nothing, not to everything.
+    filter.region = { $in: [] };
+    return;
+  } else if (asked.length === 0) {
+    values = mine;
+  } else {
+    values = asked.filter((r) => mine.includes(r));
+    if (values.length === 0) {
+      filter.region = { $in: [] };
+      return;
+    }
+  }
+
   if (values.length === 1) filter.region = values[0];
   else if (values.length > 1) filter.region = { $in: values };
 };
@@ -219,7 +264,7 @@ export const applySrNoFilter = (filter, srNo) => {
   }
 };
 
-function escapeRegex(text) {
+export function escapeRegex(text) {
   return text.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&');
 }
 

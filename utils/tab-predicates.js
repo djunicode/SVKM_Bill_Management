@@ -29,6 +29,17 @@
 const FILLED = { $ne: null };
 const BLANK = null;
 
+/**
+ * "Payment Status" as the matrix uses it.
+ *
+ * Tested as "not Paid" rather than "equals Unpaid" on purpose. Legacy rows
+ * carry a blank status - that is observation N-28, fixed separately - and an
+ * equality test would drop every one of them off its tab until the backfill
+ * had run. This excludes paid bills, which is what was actually reported,
+ * without making tab membership depend on the backfill.
+ */
+const NOT_PAID = { $ne: "Paid" };
+
 export const TABS = ["home", "incoming", "forwarded"];
 
 /** Roles that have an Incoming tab at all. */
@@ -39,29 +50,52 @@ const canon = (role) =>
   ({ pimo_mumbai: "site_pimo", trustees: "director" }[role] || role);
 
 const HOME = {
-  // Bills sitting at site: received there, not yet dispatched to PIMO.
+  // On hold at site, and PIMO has not yet acknowledged it.
+  //
+  // This used to require column 61 BLANK and currentCount 1, which meant a
+  // bill dispatched to PIMO but not yet received there fell off Site Home -
+  // and Site Forwarded needs column 62, which it does not have either, so it
+  // appeared on no tab at all (observation N-34). Keying on 62 rather than 61
+  // keeps it at site until PIMO actually receives it.
   site_officer: {
-    "pimoMumbai.dateGiven": BLANK,
+    "pimoMumbai.dateReceived": BLANK,
     siteStatus: "hold",
-    currentCount: 1,
+    "accountsDept.status": NOT_PAID,
   },
 
-  // col 62 - received at PIMO. A bill raised at PIMO is stamped at creation.
+  // col 62 - received at PIMO, accepted at site, not yet paid.
+  //
+  // Reject and Proforma bills were appearing here, and so were paid ones
+  // (observation N-27; she named 2600025, 2600027, 2600028 and 2600029).
   site_pimo: {
     "pimoMumbai.dateReceived": FILLED,
     "accountsDept.dateReceived": BLANK,
+    siteStatus: "accept",
+    "accountsDept.status": NOT_PAID,
   },
 
-  // col 82 - received in Accounts, not yet paid.
+  // col 82 - received in Accounts, not yet paid, and accepted at site.
+  //
+  // This was deliberately loosened to "not Reject and not Proforma", on the
+  // reasoning that nothing guaranteed the status had reached accept by the
+  // time a bill got to Accounts. The client has confirmed that it does:
+  //
+  //   "The bill must be forwarded from Site Team to PIMO Team and then only to
+  //    Accounts Team. Once the bill is accepted in PIMO, Status at Site changes
+  //    to Accept... Site Team can't send the bill to Accounts Team."
+  //
+  // So the strict test is safe, and is what the matrix asks for.
   accounts: {
     "accountsDept.dateReceived": FILLED,
     "accountsDept.paymentDate": BLANK,
+    siteStatus: "accept",
   },
 
   // Hold or Accept, and unpaid.
   director: {
     siteStatus: { $in: ["hold", "accept"] },
     "accountsDept.paymentDate": BLANK,
+    "accountsDept.status": NOT_PAID,
   },
 
   // Given to QS (measure, prov COP, or QS Mumbai) and not yet returned.
@@ -76,6 +110,8 @@ const HOME = {
         ],
       },
     ],
+    siteStatus: { $in: ["hold", "accept"] },
+    "accountsDept.status": NOT_PAID,
   },
 };
 
@@ -107,9 +143,16 @@ const FORWARDED = {
     siteStatus: { $in: ["hold", "accept"] },
     "accountsDept.paymentDate": FILLED,
   },
-  qs_site: { "pimoMumbai.dateReturnedFromQs": FILLED },
+  // col 66 filled, OR the bill was forwarded as Proforma / Reject at site.
+  // The second clause is new (observation N-17): those bills never come back
+  // from QS, so column 66 alone left them on the QS Home tab for ever.
+  qs_site: {
+    $or: [
+      { "pimoMumbai.dateReturnedFromQs": FILLED },
+      { siteStatus: { $in: ["proforma", "reject"] } },
+    ],
+  },
 };
-
 const BY_TAB = { home: HOME, incoming: INCOMING, forwarded: FORWARDED };
 
 /**
@@ -144,7 +187,9 @@ export const SORT_FIELD = {
     site_pimo: "pimoMumbai.dateReceived", // col 62
     accounts: "accountsDept.dateReceived", // col 82
     director: "taxInvRecdAtSite", // col 24
-    qs_site: ["qsInspection.dateGiven", "qsCOP.dateGiven", "qsMumbai.dateGiven"], // 35 -> 40 -> 64
+    // col 40 first, then 35, then 64. She asked for Prov COP to lead
+    // (observation N-35); the fallback chain itself stays.
+    qs_site: ["qsCOP.dateGiven", "qsInspection.dateGiven", "qsMumbai.dateGiven"], // 40 -> 35 -> 64
   },
   incoming: {
     site_pimo: "pimoMumbai.dateGiven", // col 61

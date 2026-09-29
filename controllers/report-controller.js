@@ -1,4 +1,5 @@
 import Bill from "../models/bill-model.js";
+import VendorMaster from "../models/vendor-master-model.js";
 import {
   FIELDS,
   endOfDay,
@@ -20,6 +21,7 @@ import {
   appendGrandTotalCourierStyle,
   sortUnpaidFirstThenAmountDesc,
   daysBetween,
+  escapeRegex,
 } from "../utils/report-utils.js";
 
 const handleReportError = (res, error, label) => {
@@ -31,8 +33,19 @@ const handleReportError = (res, error, label) => {
   });
 };
 
+/**
+ * Reports 1-11 sort on their own date column, then on Sr no DESCENDING.
+ *
+ * The second key was missing, so bills sharing a date came back in whatever
+ * order mongo happened to return them and the order changed between runs
+ * (observation N-05). Applying it here rather than at each of the ten call
+ * sites means a new report cannot forget it.
+ */
 const fetchBills = (filter, sort) =>
-  Bill.find(filter).sort(sort).populate("vendor").populate("natureOfWork");
+  Bill.find(filter)
+    .sort({ ...sort, srNo: -1 })
+    .populate("vendor")
+    .populate("natureOfWork");
 
 // 12. Outstanding Bills Report
 export const getOutstandingBillsReport = async (req, res) => {
@@ -46,8 +59,17 @@ export const getOutstandingBillsReport = async (req, res) => {
       siteStatus: "accept",
     };
 
-    applyOptionalDateRange(filter, FIELDS.taxInvDate, req.query);
-    applyRegionFilter(filter, region);
+    /*
+     * The date range keys on column 82, "Dt recd-Accts", not on the tax
+     * invoice date (observation S-25: "filter is wrongly done on Tax Inv Date
+     * column"). The report answers "what is outstanding in Accounts", so the
+     * window that matters is when Accounts received the bill.
+     *
+     * Membership - column 82 filled, column 89 blank, Status Accept - is
+     * already what the filter above asserts.
+     */
+    applyOptionalDateRange(filter, FIELDS.acctsReceived, req.query);
+    applyRegionFilter(filter, region, req.user);
     await applyVendorFilter(filter, vendor || vendorName);
 
     const outstandingBills = await Bill.find(filter)
@@ -88,6 +110,9 @@ export const getOutstandingBillsReport = async (req, res) => {
         totalCopAmount += isNaN(copAmt) ? 0 : copAmt;
 
         reportData.push({
+          // The id lets the report save an edited Remarks for Payment
+          // Instructions straight back to the bill (23.09, item 13).
+          _id: bill._id,
           srNo: bill.srNo,
           projectDescription: bill.projectDescription || "",
           region: bill.region || "",
@@ -179,8 +204,17 @@ export const getOutstandingBillsSubtotalReport = async (req, res) => {
       siteStatus: "accept",
     };
 
-    applyOptionalDateRange(filter, FIELDS.taxInvDate, req.query);
-    applyRegionFilter(filter, region);
+    /*
+     * The date range keys on column 82, "Dt recd-Accts", not on the tax
+     * invoice date (observation S-25: "filter is wrongly done on Tax Inv Date
+     * column"). The report answers "what is outstanding in Accounts", so the
+     * window that matters is when Accounts received the bill.
+     *
+     * Membership - column 82 filled, column 89 blank, Status Accept - is
+     * already what the filter above asserts.
+     */
+    applyOptionalDateRange(filter, FIELDS.acctsReceived, req.query);
+    applyRegionFilter(filter, region, req.user);
     await applyVendorFilter(filter, vendor || vendorName);
 
     const outstandingBills = await Bill.find(filter).populate("vendor");
@@ -281,7 +315,7 @@ export const getInvoicesReceivedAtSite = async (req, res) => {
       siteStatus: "hold",
     };
     applyOptionalDateRange(filter, FIELDS.taxInvRecdAtSite, req.query);
-    applyRegionFilter(filter, region);
+    applyRegionFilter(filter, region, req.user);
 
     const bills = await fetchBills(filter, { taxInvRecdAtSite: -1 });
     const reportData = appendGrandTotalTaxAmount(
@@ -325,7 +359,7 @@ export const getInvoicesReceivedAtPIMOMumbai = async (req, res) => {
       siteStatus: "accept",
     };
     applyOptionalDateRange(filter, FIELDS.pimoReceived, req.query);
-    applyRegionFilter(filter, region);
+    applyRegionFilter(filter, region, req.user);
 
     const bills = await fetchBills(filter, { "pimoMumbai.dateReceived": -1 });
     const reportData = appendGrandTotalTaxAmount(
@@ -363,15 +397,23 @@ export const getInvoicesReceivedAtPIMOMumbai = async (req, res) => {
 export const getInvoicesGivenToQsSite = async (req, res) => {
   try {
     const region = normalizeQueryList(req.query.region);
+    /*
+     * Keyed on column 35, "Dt given-QS for measure" (qsInspection.dateGiven).
+     *
+     * It used to key on qsMeasurementCheck.dateGiven, "Dt Checked by QS with
+     * Measure" - a later event. A report about invoices still WITH QS has to
+     * be driven by when they went to QS, not by when QS finished with them
+     * (observation N-07).
+     */
     const filter = {
-      ...dateFilled(FIELDS.qsMeasureGiven),
+      ...dateFilled(FIELDS.qsGivenForMeasure),
       ...dateBlank(FIELDS.qsMeasureReturn),
       siteStatus: "hold",
     };
-    applyOptionalDateRange(filter, FIELDS.qsMeasureGiven, req.query);
-    applyRegionFilter(filter, region);
+    applyOptionalDateRange(filter, FIELDS.qsGivenForMeasure, req.query);
+    applyRegionFilter(filter, region, req.user);
 
-    const bills = await fetchBills(filter, { "qsMeasurementCheck.dateGiven": -1 });
+    const bills = await fetchBills(filter, { [FIELDS.qsGivenForMeasure]: -1 });
     const reportData = appendGrandTotalTaxAmount(
       bills.map((invoice) => ({
         srNo: invoice.srNo,
@@ -382,7 +424,7 @@ export const getInvoicesGivenToQsSite = async (req, res) => {
         taxInvNo: invoice.taxInvNo,
         taxInvDate: fmt(invoice.taxInvDate),
         taxInvAmt: invoice.taxInvAmt ?? 0,
-        dateGivenToQSMeasurement: fmt(invoice.qsMeasurementCheck?.dateGiven),
+        dateGivenToQSMeasurement: fmt(invoice.qsInspection?.dateGiven), // col 35
         poNo: invoice.poNo,
       }))
     );
@@ -412,7 +454,7 @@ export const getInvoicesAtQSforProvCOP = async (req, res) => {
       siteStatus: "hold",
     };
     applyOptionalDateRange(filter, FIELDS.qsCopGiven, req.query);
-    applyRegionFilter(filter, region);
+    applyRegionFilter(filter, region, req.user);
 
     const bills = await fetchBills(filter, { "qsCOP.dateGiven": -1 });
     const reportData = appendGrandTotalTaxAmount(
@@ -449,13 +491,21 @@ export const getInvoicesAtQSforProvCOP = async (req, res) => {
 export const getInvoicesAtQSMumbai = async (req, res) => {
   try {
     const region = normalizeQueryList(req.query.region);
+    /*
+     * No Status at Site test here (observation S-31: "not working").
+     *
+     * It required "hold", but a bill only reaches QS Mumbai for COP after PIMO
+     * has received it, and PIMO acceptance sets the status to "accept" - as the
+     * client confirmed on 26 September. The report could therefore never return
+     * a single row. Columns 64 and 66 alone identify the bills that are with QS
+     * Mumbai.
+     */
     const filter = {
       ...dateFilled(FIELDS.qsMumbaiGiven),
       ...dateBlank(FIELDS.qsMumbaiReturn),
-      siteStatus: "hold",
     };
     applyOptionalDateRange(filter, FIELDS.qsMumbaiGiven, req.query);
-    applyRegionFilter(filter, region);
+    applyRegionFilter(filter, region, req.user);
 
     const bills = await fetchBills(filter, { "qsMumbai.dateGiven": -1 });
     const reportData = appendGrandTotalTaxAmount(
@@ -499,7 +549,7 @@ export const getInvoicesCourierToPIMOMumbai = async (req, res) => {
       siteStatus: "hold",
     };
     applyOptionalDateRange(filter, FIELDS.pimoDispatch, req.query);
-    applyRegionFilter(filter, region);
+    applyRegionFilter(filter, region, req.user);
 
     const bills = await fetchBills(filter, { "pimoMumbai.dateGiven": -1 });
     const reportData = appendGrandTotalCourierStyle(
@@ -540,7 +590,7 @@ export const getInvoicesReturnedByQsSite = async (req, res) => {
       siteStatus: "hold",
     };
     applyOptionalDateRange(filter, FIELDS.qsMeasureReturn, req.query);
-    applyRegionFilter(filter, region);
+    applyRegionFilter(filter, region, req.user);
 
     const bills = await fetchBills(filter, { "vendorFinalInv.dateGiven": -1 });
     const reportData = appendGrandTotalCourierStyle(
@@ -580,7 +630,7 @@ export const getInvoicesReturnedByQsCOP = async (req, res) => {
       siteStatus: "hold",
     };
     applyOptionalDateRange(filter, FIELDS.qsCopReturn, req.query);
-    applyRegionFilter(filter, region);
+    applyRegionFilter(filter, region, req.user);
 
     const bills = await fetchBills(filter, { "copDetails.dateReturned": -1 });
     const reportData = appendGrandTotalCourierStyle(
@@ -620,7 +670,7 @@ export const getInvoicesReturnedByQSMumbai = async (req, res) => {
       siteStatus: "accept",
     };
     applyOptionalDateRange(filter, FIELDS.qsMumbaiReturn, req.query);
-    applyRegionFilter(filter, region);
+    applyRegionFilter(filter, region, req.user);
 
     const bills = await fetchBills(filter, { "pimoMumbai.dateReturnedFromQs": -1 });
     const reportData = appendGrandTotalCourierStyle(
@@ -665,7 +715,7 @@ export const getInvoicesGivenToAcctsDept = async (req, res) => {
       siteStatus: "accept",
     };
     applyOptionalDateRange(filter, FIELDS.acctsGiven, req.query);
-    applyRegionFilter(filter, region);
+    applyRegionFilter(filter, region, req.user);
 
     const bills = await fetchBills(filter, { "accountsDept.dateGiven": -1 });
     const reportData = appendGrandTotalCourierStyle(
@@ -709,7 +759,7 @@ export const getInvoicesPaid = async (req, res) => {
       siteStatus: "accept",
     };
     applyOptionalDateRange(filter, FIELDS.paymentDate, req.query);
-    applyRegionFilter(filter, region);
+    applyRegionFilter(filter, region, req.user);
 
     if (f110Identification) {
       filter["accountsDept.f110Identification"] = f110Identification;
@@ -789,7 +839,7 @@ export const getBillKidharReport = async (req, res) => {
       ...dateFilled(FIELDS.taxInvRecdAtSite),
     };
     const dateRange = applyKidharJourneyDateRange(filter, req.query);
-    applyRegionFilter(filter, region);
+    applyRegionFilter(filter, region, req.user);
     applyPaymentStatusFilter(filter, paymentStatus);
     await applyVendorFilter(filter, vendorName);
     applyTaxInvNoFilter(filter, taxInvNo);
@@ -851,7 +901,7 @@ export const getBillJourney = async (req, res) => {
       ...dateFilled(FIELDS.taxInvRecdAtSite),
     };
     applyKidharJourneyDateRange(filter, req.query);
-    applyRegionFilter(filter, region);
+    applyRegionFilter(filter, region, req.user);
     applySrNoFilter(filter, srNo);
     await applyVendorFilter(filter, vendorName);
     applyTaxInvNoFilter(filter, taxInvNo);
@@ -935,30 +985,101 @@ export const getBillJourney = async (req, res) => {
         poDate: bill.poDate,
         poAmt: bill.poAmt || "",
         department: bill.department || "",
-        billReceivedAtSite: fmt(bill.taxInvRecdAtSite),
-        receiptByProjectTeam: "",
-        receivedForPO: fmt(bill.poDate),
-        receiptOfPO: "",
-        billSendForQualityCertification: fmt(bill.qualityEngineer?.dateGiven),
-        billSendToQS: fmt(bill.qsMeasurementCheck?.dateGiven),
-        certifiedByQS: fmt(bill.qsCOP?.dateGiven),
-        certifiedByArch: fmt(bill.architect?.dateGiven),
-        billSendToSiteEngineer: fmt(bill.siteIncharge?.dateGiven),
-        receiptBySiteProjectDirector: "",
-        receiptAtMPTP: "",
-        certifiedByLPC: "",
-        migoDateNo: bill.migoDetails?.date ? `${fmt(bill.migoDetails.date)} / ${bill.migoDetails.no || ''}` : "",
-        billSendToPIMOMumbai: fmt(bill.pimoMumbai?.dateGiven),
-        billReceivedAtPIMOMumbai: fmt(bill.pimoMumbai?.dateReceived),
-        billSendToQSCertification: fmt(bill.qsMumbai?.dateGiven),
-        receivedFromQSWithCOP: fmt(bill.pimoMumbai?.dateReturnedFromQs),
-        givenToITDept: fmt(bill.itDept?.dateGiven),
-        receivedBackFromITDept: fmt(bill.itDept?.dateReceived),
-        sesDateNo: bill.sesDetails?.date ? `${fmt(bill.sesDetails.date)} / ${bill.sesDetails.no || ''}` : "",
-        certifiedByProjectDirector: fmt(bill.approvalDetails?.directorApproval?.dateGiven),
-        certifiedByProjectAdvisor: "",
-        certifiedByMCMembers: "",
-        submittedToAccountsDepartment: fmt(bill.accountsDept?.dateGiven),
+        /*
+         * The journey rows, mapped column by column from the client's own
+         * "Bill Journey report.xlsx" (attached 23 September). Every value
+         * below names the Field-entry column it comes from.
+         *
+         * Several were wired to the wrong column, which is why "columns
+         * filled are not fetched" (observation N-10): "Bill send to QS" read
+         * the measurement-CHECK date instead of col 35, "Certified by QS"
+         * read the date the bill was GIVEN to QS instead of the COP date,
+         * "Received Back from I.T.Dept." read a field the workflow never
+         * writes, and "Certified by Trustee" read the date the bill was sent
+         * FOR approval rather than the date it came back. The name and amount
+         * columns her layout calls for were absent altogether.
+         */
+        // Added at her request (29.09, item 28).
+        siteApprovalDate: fmt(bill.siteOfficeDispatch?.dateGiven),            // 58
+        migoDate: fmt(bill.migoDetails?.date),                                // 47
+        sesDate: fmt(bill.sesDetails?.date),                                  // 74
+
+        billReceivedAtSite: fmt(bill.taxInvRecdAtSite),                       // 24
+        billReceivedAtSiteName: bill.taxInvRecdBy || "",                      // 25
+
+        /*
+         * The hand-signed rows were dropped from the report altogether
+         * (29.09, item 28) - they never carried a value, and eleven empty
+         * columns made the sheet hard to read.
+         */
+
+        billSendForQualityCertification: fmt(bill.qualityEngineer?.dateGiven), // 33
+        billSendForQualityCertificationName: bill.qualityEngineer?.name || "", // 34
+
+        // "Column 35 /Column 40" - measurement if present, else Prov COP.
+        billSendToQS: fmt(bill.qsInspection?.dateGiven || bill.qsCOP?.dateGiven),
+        billSendToQSName: bill.qsInspection?.dateGiven
+          ? bill.qsInspection?.name || ""                                     // 36
+          : bill.qsCOP?.name || "",                                           // 41
+
+        certifiedByQS: fmt(bill.copDetails?.date),                            // 42
+        certifiedByQSAmount: bill.copDetails?.amount ?? "",                   // 43
+
+        certifiedByArch: fmt(bill.architect?.dateGiven),                      // 53
+        certifiedByArchName: bill.architect?.name || "",                      // 54
+
+        // "Column 51 /Column 55" - Site Engineer if present, else Site Incharge.
+        billSendToSiteEngineer: fmt(bill.siteEngineer?.dateGiven || bill.siteIncharge?.dateGiven),
+        billSendToSiteEngineerName: bill.siteEngineer?.dateGiven
+          ? bill.siteEngineer?.name || ""                                     // 52
+          : bill.siteIncharge?.name || "",                                    // 56
+
+
+        migoDateNo: bill.migoDetails?.date                                    // 47 / 46
+          ? `${fmt(bill.migoDetails.date)} / ${bill.migoDetails.no || ""}`
+          : "",
+        migoDoneBy: bill.migoDetails?.doneBy || "",                           // 49
+        migoAmount: bill.migoDetails?.amount ?? "",                           // 48
+
+        billSendToPIMOMumbai: fmt(bill.pimoMumbai?.dateGiven),                // 61
+
+        billReceivedAtPIMOMumbai: fmt(bill.pimoMumbai?.dateReceived),         // 62
+        billReceivedAtPIMOMumbaiName: bill.pimoMumbai?.receivedBy || "",      // 63
+
+        billSendToQSCertification: fmt(bill.qsMumbai?.dateGiven),             // 64
+        billSendToQSCertificationName: bill.qsMumbai?.name || "",             // 65
+
+        receivedFromQSWithCOP: fmt(bill.pimoMumbai?.dateReturnedFromQs),      // 66
+        receivedFromQSWithCOPName: bill.pimoMumbai?.nameReturnedFromQs || "", // 67
+        receivedFromQSWithCOPAmount: bill.copDetails?.amount ?? "",           // 43
+
+        givenToITDept: fmt(bill.itDept?.dateGiven),                           // 68
+        givenToITDeptName: bill.itDept?.name || "",                           // 69
+
+        receivedBackFromITDept: fmt(bill.pimoMumbai?.dateReceivedFromIT),     // 75
+        receivedBackFromITDeptName: bill.pimoMumbai?.nameReceivedFromIT || "", // 75A
+
+        sesDateNo: bill.sesDetails?.date                                      // 74 / 72
+          ? `${fmt(bill.sesDetails.date)} / ${bill.sesDetails.no || ""}`
+          : "",
+        sesDoneBy: bill.sesDetails?.doneBy || "",                             // 74A
+        sesAmount: bill.sesDetails?.amount ?? "",                             // 73
+
+        certifiedByProjectDirector: fmt(bill.pimoMumbai?.dateReturnedFromDirector), // 78
+
+        submittedToAccountsDepartment: fmt(bill.accountsDept?.dateGiven),     // 80
+        // Column 81, confirmed by the client on 26 September. Her original
+        // sheet named 82A for this row as well as the one below.
+        submittedToAccountsDepartmentName: bill.accountsDept?.givenBy || "",  // 81
+
+        receivedInAccountsDepartment: fmt(bill.accountsDept?.dateReceived),   // 82
+        receivedInAccountsDepartmentName: bill.accountsDept?.receivedBy || "", // 82A
+
+        // Header block values her layout calls for that were never projected.
+        status: bill.accountsDept?.status || "",                              // 93
+        copAmt: bill.copDetails?.amount ?? "",                                // 43
+        paymentAmt: bill.accountsDept?.paymentAmt ?? "",                      // 91
+        paymentDate: fmt(bill.accountsDept?.paymentDate),                     // 89
         delay_for_receiving_invoice,
         no_of_Days_Site,
         no_of_Days_at_Mumbai,
@@ -1017,7 +1138,7 @@ export const getPendingBillsReport = async (req, res) => {
       ...dateBlank(FIELDS.paymentDate),
     };
     applyOptionalDateRange(filter, FIELDS.taxInvRecdAtSite, req.query);
-    applyRegionFilter(filter, region);
+    applyRegionFilter(filter, region, req.user);
 
     const pendingBills = await Bill.find(filter).populate("vendor");
 
@@ -1112,5 +1233,69 @@ export const getPendingBillsReport = async (req, res) => {
     );
   } catch (error) {
     return handleReportError(res, error, "pending bills report");
+  }
+};
+
+/**
+ * Vendor Details report (observation N-08).
+ *
+ * "Create new report-Vendor details in which all details of vendors created
+ *  should be available. Report functionality for download and print should be
+ *  available. This report should be available in all teams"
+ *
+ * Every other report is a view over bills; this one is a view over the vendor
+ * master, so it takes none of the bill filters. It is deliberately open to all
+ * teams, which is why its route carries no role list - the vendor master is
+ * already readable by any signed-in user for the create-bill lookup.
+ *
+ * Email IDs and phone numbers are arrays on the vendor; they are joined here
+ * for the same reason the master download joins them, so a cell does not read
+ * ["a@b.com"].
+ */
+export const getVendorDetailsReport = async (req, res) => {
+  try {
+    const search = normalizeQueryValue(req.query.vendorName);
+
+    const filter = {};
+    if (search) {
+      filter.$or = [
+        { vendorName: { $regex: escapeRegex(String(search).trim()), $options: "i" } },
+        { vendorNo: Number.isNaN(Number(search)) ? undefined : Number(search) },
+      ].filter((c) => Object.values(c)[0] !== undefined);
+    }
+
+    const vendors = await VendorMaster.find(filter)
+      .sort({ vendorNo: 1 }) // as the master download is specified
+      .populate("PANStatus", "name")
+      .populate("complianceStatus", "compliance206AB");
+
+    const list = (v) => (Array.isArray(v) ? v.filter(Boolean).join(", ") : v || "");
+
+    const reportData = vendors.map((vendor, index) => ({
+      count: index + 1,
+      vendorNo: vendor.vendorNo ?? "",
+      vendorName: vendor.vendorName || "",
+      PAN: vendor.PAN || "",
+      GSTNumber: vendor.GSTNumber || "",
+      complianceStatus:
+        vendor.complianceStatus?.compliance206AB || vendor.complianceStatus || "",
+      PANStatus: vendor.PANStatus?.name || vendor.PANStatus || "",
+      emailIds: list(vendor.emailIds),
+      phoneNumbers: list(vendor.phoneNumbers),
+      addl1: vendor.addl1 || "",
+      addl2: vendor.addl2 || "",
+      createdAt: fmt(vendor.createdAt),
+    }));
+
+    return res.status(200).json(
+      buildReportResponse(
+        "Vendor Details",
+        { vendorName: search || "All vendors" },
+        reportData,
+        { summary: { totalVendors: reportData.length } }
+      )
+    );
+  } catch (error) {
+    return handleReportError(res, error, "vendor details report");
   }
 };

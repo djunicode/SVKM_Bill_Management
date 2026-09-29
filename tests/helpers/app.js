@@ -20,6 +20,7 @@ import workflowRoute from "../../routes/workflow-routes.js";
 import masterRoute from "../../routes/master-routes.js";
 import sentBillsRoute from "../../routes/sentBills-routes.js";
 import kpiRoute from "../../routes/kpi-route.js";
+import formRoute from "../../routes/form-route.js";
 
 export const buildApp = () => {
   const app = express();
@@ -39,6 +40,7 @@ export const buildApp = () => {
   app.use("/api/reports", reportRoutes);
   app.use("/workflow", workflowRoute);
   app.use("/kpi", kpiRoute);
+  app.use("/forms", formRoute); // forms repository (29.09, reply Q2)
 
   // Mirrors the error handler in index.js
   app.use((err, req, res, _next) => {

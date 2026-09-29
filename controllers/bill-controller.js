@@ -9,7 +9,7 @@ import {
   homeAndIncomingFilter,
   sortValueFor,
 } from "../utils/tab-predicates.js";
-import { isAdminRole, primaryRole } from "../utils/roles.js";
+import { isAdminRole, primaryRole, teamLabelFor } from "../utils/roles.js";
 import {
   duplicateBillQuery,
   DUPLICATE_BILL_MESSAGE,
@@ -23,6 +23,7 @@ import CurrencyMaster from "../models/currency-master-model.js";
 import User from "../models/user-model.js";
 import { extractFileKeyFromUrl, s3Delete, s3Upload } from "../utils/s3.js";
 import mongoose from "mongoose";
+import { nextSrNo, SR_NO_PATTERN } from "../utils/serial-number.js";
 
 // Validation function for amount only (vendor validation is now handled via vendor reference)
 const validateAmount = (amount) => {
@@ -200,25 +201,10 @@ const createBill = async (req, res) => {
     }
 
     // Create a base object with all fields initialized to null or empty objects
-    const fyPrefix = getFinancialYearPrefix(new Date(req.body.billDate));
-
-    // Find the highest serial number for this financial year
-    const highestSerialBill = await Bill.findOne(
-      { srNo: { $regex: `^${fyPrefix}` } },
-      { srNo: 1 },
-      { sort: { srNo: -1 } }
-    );
-
-    let nextSerial = 1;
-
-    if (highestSerialBill && highestSerialBill.srNo) {
-      const serialPart = parseInt(highestSerialBill.srNo.substring(4));
-      nextSerial = serialPart + 1;
-    }
-
-
-    const serialFormatted = nextSerial.toString().padStart(5, "0");
-    const newSrNo = `${fyPrefix}${serialFormatted}`;
+    // 8 digits: financial year + six-digit sequence (29.09, reply Q1). The
+    // old code read the sequence with substring(4) on a two-digit prefix,
+    // which only worked while the sequence stayed under 1,000.
+    const newSrNo = await nextSrNo(Bill, req.body.billDate);
 
     // Build a bill object with all schema fields, setting null/default for missing fields
     const schemaFields = Object.keys(Bill.schema.paths);
@@ -297,6 +283,20 @@ const createBill = async (req, res) => {
       }
       // compliance206AB field removed - now derived from vendor
 
+      /*
+       * Leave defaulted fields alone when the client did not send them.
+       *
+       * This loop walked every schema path and wrote an explicit null for
+       * anything absent from the body - which OVERRIDES the schema default.
+       * accountsDept.status is declared `default: "Unpaid"`, so every bill
+       * created through the API was born with a null payment status instead,
+       * which is why the column reads blank on so many rows (observation
+       * N-28). Any other defaulted field was being silently nulled too.
+       */
+      if (req.body[field] === undefined && Bill.schema.paths[field]?.defaultValue !== undefined) {
+        continue;
+      }
+
       billData[field] = req.body[field] !== undefined ? req.body[field] : null;
     }
 
@@ -349,6 +349,7 @@ const createBill = async (req, res) => {
     const newBillData = {
       ...billData,
       createdBy: createdByName,
+      createdByTeam: teamLabelFor(req.user?.role), // printed on the checklist
       workflowState: {
         currentState: "Site_Officer",
         history: [],
@@ -1392,14 +1393,14 @@ export const getBillsByWorkflowState = async (req, res) => {
   }
 };
 
-// Get bill by srNo (7 digits)
+// Get bill by srNo (8 digits; legacy 7-digit serials still resolve)
 export const getBillBySrNo = async (req, res) => {
   try {
     const { srNo } = req.params;
-    if (!/^\d{7}$/.test(srNo)) {
+    if (!SR_NO_PATTERN.test(srNo)) {
       return res
         .status(400)
-        .json({ message: "Invalid srNo format. Must be 7 digits." });
+        .json({ message: "Invalid srNo format. Must be 8 digits." });
     }
     const bill = await Bill.findOne({ srNo })
       .populate("currency")
@@ -1473,17 +1474,14 @@ const editPaymentInstructions = async (req, res) => {
       bill.accountsDept.remarksForPayInstructions = remarksForPayInstructions
     if (f110Identification !== undefined)
       bill.accountsDept.f110Identification = f110Identification;
-    if (paymentDate !== undefined) {
+    if (paymentDate !== undefined)
       bill.accountsDept.paymentDate = paymentDate;
-      // Clearing the payment date must not leave the bill marked Paid. An
-      // explicit null is how the grid removes a date, and it used to set the
-      // status to Paid on the way through.
-      bill.accountsDept.status = paymentDate ? "Paid" : "Unpaid";
-    }
     if (paymentAmt !== undefined)
       bill.accountsDept.paymentAmt = paymentAmt;
-    if (status !== undefined)
-      bill.accountsDept.status = status;
+    // Payment Status is not taken from the request: the pre-save hook
+    // derives it from the payment date (29.09, item 15). `status` is still
+    // accepted in the body so older callers do not fail.
+    void status;
 
     // const updatedBill = await Bill.findByIdAndUpdate(
     //   id,
@@ -1638,34 +1636,27 @@ const accountsPaymentReject = async (req, res) => {
     }
 
     /*
-     * Rejecting a payment must return the bill to the SITE team's HOME tab.
+     * Rejecting a payment clears the payment date and NOTHING else.
      *
-     * Clearing the payment date alone left the bill wherever it was - which is
-     * why the client saw it land on Site's FORWARDED tab instead. Site home is
-     * "col 61 blank, status Hold, count 1", so the dispatch and receipt dates
-     * have to be cleared as well. (observations, Teamwise Accounts-4)
+     * This used to send the bill all the way back to Site - clearing columns
+     * 61, 62, 80 and 82, setting Status at Site to Hold and the count to 1 -
+     * which was built to the earlier instruction (observations, Teamwise
+     * Accounts-4). The client has since replaced that rule outright:
      *
-     * The old guard `if (accountsDept.status)` also skipped rows whose status
-     * was already blank, which is exactly the set that needed fixing (T-02).
+     *   "if reject payment, then only date of payment should be removed (so
+     *    payment status will become unpaid from paid) and the bill should move
+     *    from forwarded tab to Home tab of Accounts Team. No other data should
+     *    be removed. It should not go back to PIMO/Site Team. Status at Site
+     *    should remain 'accept' only."
+     *
+     * Clearing column 89 alone is sufficient to move the bill: the Accounts
+     * Forwarded tab is "payment date filled" and Accounts Home is "column 82
+     * filled and payment date blank", so the bill crosses between them on this
+     * one field. The status follows the date via the model's pre-save hook.
      */
     if (billFound.accountsDept) {
-      billFound.accountsDept.paymentDate = null; // col 89
-      billFound.accountsDept.status = "Unpaid"; // col 93
-      billFound.accountsDept.dateGiven = null; // col 80
-      billFound.accountsDept.givenBy = null; // col 81
-      billFound.accountsDept.dateReceived = null; // col 82
-      billFound.accountsDept.receivedBy = null; // col 82A
-      billFound.accountsDept.markReceived = false;
+      billFound.accountsDept.paymentDate = null; // col 89 - the only change
     }
-    if (billFound.pimoMumbai) {
-      billFound.pimoMumbai.dateGiven = null; // col 61
-      billFound.pimoMumbai.namePIMO = null; // col 61A
-      billFound.pimoMumbai.dateReceived = null; // col 62
-      billFound.pimoMumbai.receivedBy = null; // col 63
-      billFound.pimoMumbai.markReceived = false;
-    }
-    billFound.siteStatus = "hold";
-    billFound.currentCount = 1;
 
     await billFound.save();
 
@@ -1798,6 +1789,23 @@ const deleteDate = async (req, res) => {
         "QS Mumbai to PIMO": {
           fields: ["pimoMumbai.dateReturnedFromQs", "pimoMumbai.nameReturnedFromQs"], // 66, 67
         },
+        /*
+         * "Mark as not received" for QS (observation N-18).
+         *
+         *   "If added values in following columns should be removed if
+         *    selected: 64 Dt given-QS Mumbai for COP, 65 Name-QS Mumbai for
+         *    COP. If value in above columns is empty then value in following
+         *    column should be removed: 40 Dt Given-QS for Prov COP,
+         *    41 Name-QS Prov COP"
+         *
+         * A step back through whichever receipt actually happened, which is
+         * why the second pair is conditional on the first being empty. The
+         * `fallbackFields` key is honoured in the update loop below.
+         */
+        "Mark as not received": {
+          fields: ["qsMumbai.dateGiven", "qsMumbai.name"], // 64, 65
+          fallbackFields: ["qsCOP.dateGiven", "qsCOP.name"], // 40, 41
+        },
       },
       // PIMO Team - the sends in the pimo_mumbai branch
       "PIMO Team": {
@@ -1818,6 +1826,16 @@ const deleteDate = async (req, res) => {
           fields: ["pimoMumbai.dateGiven", "pimoMumbai.dateReceived", "pimoMumbai.receivedBy"], // 61, 62, 63
           extraUpdates: { "pimoMumbai.markReceived": false },
         },
+      },
+      /*
+       * Trustee Team (29.09, item 11).
+       *
+       * The Trustee had no Unsend at all. Their one send - "Return to PIMO
+       * Team" - stamps column 78, so that is what Unsend clears.
+       */
+      "Trustee Team": {
+        "PIMO Team": { fields: ["pimoMumbai.dateReturnedFromDirector"] }, // 78
+        "Returned to PIMO": { fields: ["pimoMumbai.dateReturnedFromDirector"] }, // 78
       },
       // Accounts Team
       "Accounts Team": {
@@ -1866,11 +1884,39 @@ const deleteDate = async (req, res) => {
       });
     }
 
-    // Update all bills
-    const result = await Bill.updateMany(
-      { _id: { $in: billIds } },
-      { $set: updateFields }
-    );
+    /*
+     * Apply it.
+     *
+     * Most mappings clear the same fields on every bill, which is one
+     * updateMany. A mapping with `fallbackFields` cannot be: it clears the
+     * primary pair only when that pair holds something, and otherwise steps
+     * back to the earlier pair (observation N-18). That decision is per bill,
+     * so those are updated individually.
+     */
+    let result;
+    if (mapping.fallbackFields) {
+      const read = (bill, path) =>
+        path.split(".").reduce((o, k) => (o == null ? undefined : o[k]), bill);
+
+      const primaryHasValue = (bill) => mapping.fields.some((f) => read(bill, f));
+
+      let modified = 0;
+      for (const bill of existingBills) {
+        const fields = primaryHasValue(bill) ? mapping.fields : mapping.fallbackFields;
+        const set = {};
+        for (const field of fields) set[field] = null;
+        if (mapping.extraUpdates) Object.assign(set, mapping.extraUpdates);
+
+        const one = await Bill.updateOne({ _id: bill._id }, { $set: set });
+        modified += one.modifiedCount;
+      }
+      result = { modifiedCount: modified };
+    } else {
+      result = await Bill.updateMany(
+        { _id: { $in: billIds } },
+        { $set: updateFields }
+      );
+    }
 
     return res.status(200).json({
       success: true,

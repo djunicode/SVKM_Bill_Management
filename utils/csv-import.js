@@ -10,6 +10,7 @@ import ComplianceMaster from "../models/compliance-master-model.js";
 import { headerMapping } from './headerMap.js';
 import { parseDate } from './csv-patch.js';
 import { SYSTEM_IMPORT_AUTHOR } from "../constants/fieldFormats.js";
+import { serialGenerator } from './serial-number.js';
 
 /**
  * Recursively sanitizes all amount fields in an object by removing commas and converting to numbers
@@ -309,20 +310,32 @@ async function createNewBill(billData, masterData) {
   newBillData.vendorName = newBillData.vendorName || "Unknown Vendor";
   newBillData.vendorNo = newBillData.vendorNo || "Unknown";
 
-  if (newBillData.vendorName || newBillData.vendorNo) {
-    const vendor = vendors.find(v =>
-      v.vendorName?.toLowerCase().includes(newBillData.vendorName?.toLowerCase()) ||
-      v.vendorNo == newBillData.vendorNo
+  /*
+   * Vendor: an exact vendor number first, then an exact name. This used to
+   * take the first vendor whose name merely CONTAINED the text - before even
+   * looking at the number - and, failing that, invented an ObjectId pointing
+   * at no vendor. An unmatched vendor now fails the row, visibly.
+   */
+  const vendor =
+    vendors.find(v => String(v.vendorNo) === String(billData.vendorNo ?? "").trim()) ||
+    vendors.find(v =>
+      billData.vendorName &&
+      v.vendorName?.trim().toLowerCase() === String(billData.vendorName).trim().toLowerCase()
     );
-    newBillData.vendor = vendor ? vendor._id : new mongoose.Types.ObjectId();
-  } else {
-    newBillData.vendor = new mongoose.Types.ObjectId();
+  if (!vendor) {
+    throw new Error(`Vendor ${billData.vendorNo || billData.vendorName || "(blank)"} is not in the vendor master`);
   }
+  newBillData.vendor = vendor._id;
 
+  // An unknown region fails the row. It used to fall back to the first
+  // region in the master - MUMBAI - silently moving the bill to Mumbai.
   const region = regions.find(r =>
-    r.name?.toLowerCase() === newBillData.region?.toLowerCase()
-  ) || regions[0];
-  newBillData.region = region ? region.name : "DEFAULT";
+    r.name?.trim().toLowerCase() === String(newBillData.region ?? "").trim().toLowerCase()
+  );
+  if (!region) {
+    throw new Error(`Region "${newBillData.region ?? ""}" is not in the region master`);
+  }
+  newBillData.region = region.name;
 
   const currency = currencies.find(c =>
     c.currency?.toLowerCase() === newBillData.currency?.toLowerCase()
@@ -529,30 +542,8 @@ export const importBillsFromExcel = async (filePath, validVendorNos = [], patchO
 };
 
 /**
- * generator function to get the next bill number
+ * The next-serial generator for an import: 8 digits under the financial year
+ * of today's date, the same rule createBill uses (29.09, reply Q1). It used
+ * the calendar year and five-digit sequences.
  */
-async function getNextSerialNumberGenerator() {
-  const currentYear = new Date().getFullYear().toString().slice(-2);
-  const prefix = currentYear;
-
-  // Find the latest bill with this year's prefix
-  const lastBill = await Bill.findOne({
-    srNo: { $regex: new RegExp(`^${prefix}\\d{5,}$`) }
-  }).sort({ srNo: -1 }).lean();
-
-  let currentSequence = 0;
-
-  if (lastBill && lastBill.srNo) {
-    // Extract the sequence number
-    const sequencePart = lastBill.srNo.substring(prefix.length);
-    const num = parseInt(sequencePart, 10);
-    if (!isNaN(num)) {
-      currentSequence = num;
-    }
-  }
-
-  return function next() {
-    currentSequence++;
-    return `${prefix}${String(currentSequence).padStart(5, '0')}`;
-  };
-}
+const getNextSerialNumberGenerator = () => serialGenerator(Bill, new Date());

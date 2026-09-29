@@ -483,8 +483,40 @@ function applyBusinessRules(updateObj) {
 
 
 // helper fuction to get bills for particular team
-export function getPatchValidationFilter(role) {
+/**
+ * The Accounts columns that may be written even once a bill has been paid and
+ * has moved to the Forwarded tab (observation S-26).
+ */
+export const ACCOUNTS_FORWARDED_COLUMNS = [
+  "accountsDept.paymentInstructions", // Payment Instructions
+  "accountsDept.f110Identification",  // F110
+  "accountsDept.paymentDate",         // Dt of Payment
+  "accountsDept.hardCopy",            // Hard Copy
+  "accountsDept.accountsIdentification", // Accts Identification
+  "accountsDept.paymentAmt",          // Payment Amt
+];
+
+export function getPatchValidationFilter(role, user) {
+  /*
+   * Region is part of the gate, alongside team, tab and column.
+   *
+   * "At present team, home tab and columns are checked for allowing upload.
+   *  Can the region alloted in user master be checked as well?"  (N-15)
+   *
+   * Without it, a user could mass-update a bill belonging to a region they
+   * are not assigned to, as long as its Sr no put it on their team's tab.
+   */
   let filter = {};
+
+  const regions = Array.isArray(user?.region)
+    ? user.region.filter(Boolean)
+    : user?.region
+    ? [user.region]
+    : [];
+
+  if (regions.length && !regions.includes("ALL")) {
+    filter.region = { $in: regions };
+  }
 
   switch (role) {
     case "site_officer":
@@ -512,11 +544,25 @@ export function getPatchValidationFilter(role) {
       };
 
     case "accounts":
+      /*
+       * Accounts is the one exception to "Home tab only".
+       *
+       * "In mass upload, upload is allowed only when bill exist in the Home Tab
+       *  and not forwarded tab of the respective team. But in the case of
+       *  following columns in the accounts team, we need exception and mass
+       *  upload should be allowed even if bill is in forwarded tab"
+       *  -- 29.09, item 26.
+       *
+       * The six columns are listed in ACCOUNTS_FORWARDED_COLUMNS below. A bill
+       * on the Accounts FORWARDED tab is one that has been paid (column 89
+       * filled), and the payment details often arrive after the payment date -
+       * so requiring the bill still to be unpaid made those columns
+       * unreachable. The tab test is therefore dropped here and applied per
+       * column instead, in processPatchRow.
+       */
       return {
         ...filter,
-        "accountsDept.paymentDate": null,
         "accountsDept.dateGiven": { $ne: null },
-        currentCount: 5
       };
 
     case "director":
@@ -547,6 +593,12 @@ export function getPatchValidationFilter(role) {
       return filter;
   }
 }
+
+/**
+ * Every tab filter above spreads `filter` first, so the region clause added
+ * there survives into each branch. This is asserted by the mass-update tests
+ * rather than left to inspection.
+ */
 /**
  * Processes a single row for patch updates
  * @param {Object} rowData - Extracted row data
@@ -557,25 +609,42 @@ export function getPatchValidationFilter(role) {
  * @param {Object} ignoredFieldsCount - Object tracking ignored field counts
  * @returns {Promise<Object>} Result object with updated flag and optional srNo or reason
  */
-async function processPatchRow(rowData, columnMapping, srNoHeader, allowedFields, updateSummary, ignoredFieldsCount, role) {
+async function processPatchRow(rowData, columnMapping, srNoHeader, allowedFields, updateSummary, ignoredFieldsCount, role, user) {
   // Use the identified Sr No header, or try fallback
   const srNo = srNoHeader && rowData[srNoHeader] ? String(rowData[srNoHeader]).trim() : null;
 
   if (!srNo) {
     return { updated: false, reason: 'missing_srno' };
   }
-  const homeFilter = getPatchValidationFilter(role);
+  const homeFilter = getPatchValidationFilter(role, user);
   const bill = await Bill.findOne({
     srNo,
     ...homeFilter
   });
   if (!bill) {
-    return { updated: false, reason: 'bill_not_found', srNo };
+    /*
+     * Say which of the two things went wrong.
+     *
+     * "No bill exists with this Sr no" was reported for a bill that exists
+     * perfectly well but is not on the uploader's Home tab, or is in another
+     * region. Those need completely different action from the uploader, and
+     * conflating them is why the result file read as a mystery
+     * (observation N-14).
+     */
+    const exists = await Bill.findOne({ srNo }).select('region').lean();
+    if (!exists) return { updated: false, reason: 'bill_not_found', srNo };
+
+    const regions = Array.isArray(user?.region) ? user.region : [];
+    if (regions.length && !regions.includes('ALL') && !regions.includes(exists.region)) {
+      return { updated: false, reason: 'wrong_region', srNo, detail: exists.region };
+    }
+    return { updated: false, reason: 'not_on_home_tab', srNo };
   }
 
   const billData = typeof bill.toObject === 'function' ? bill.toObject() : bill;
   const updateObj = initializeUpdateObject(billData);
   let hasUpdate = false;
+  const refusedOnForwarded = [];
 
   // Iterate over the relevant columns found in the file
   for (const [header, dbField] of Object.entries(columnMapping)) {
@@ -593,6 +662,20 @@ async function processPatchRow(rowData, columnMapping, srNoHeader, allowedFields
 
     // Skip if cell is empty
     if (!isFilled(rowData[header])) {
+      continue;
+    }
+
+    /*
+     * A paid bill has left the Accounts Home tab. Only the six columns listed
+     * in ACCOUNTS_FORWARDED_COLUMNS may still be written to it (S-26);
+     * everything else stays Home-tab only, as before.
+     */
+    if (
+      role === "accounts" &&
+      bill.accountsDept?.paymentDate &&
+      !ACCOUNTS_FORWARDED_COLUMNS.includes(dbField)
+    ) {
+      if (!refusedOnForwarded.includes(header)) refusedOnForwarded.push(String(header).trim());
       continue;
     }
 
@@ -618,14 +701,21 @@ async function processPatchRow(rowData, columnMapping, srNoHeader, allowedFields
   } else {
     // If we are here, it means we found the bill but had no valid updates to apply
     // Check if permission issues were the cause
-    const permissionDenied = Object.entries(columnMapping).some(([h, dbField]) =>
-      isFilled(rowData[h]) && !isFieldAllowed(dbField, allowedFields)
-    );
+    const refused = Object.entries(columnMapping)
+      .filter(([h, dbField]) => isFilled(rowData[h]) && !isFieldAllowed(dbField, allowedFields))
+      .map(([h]) => String(h).trim());
+
+    if (!refused.length && refusedOnForwarded.length) {
+      return { updated: false, reason: 'paid_bill_column', srNo, detail: refusedOnForwarded.join(', ') };
+    }
 
     return {
       updated: false,
-      reason: permissionDenied ? 'permission_denied' : 'no_updates',
-      srNo
+      reason: refused.length ? 'permission_denied' : 'no_updates',
+      srNo,
+      // The uploader needs to know WHICH column was refused, not merely that
+      // one was (observation N-14).
+      detail: refused.length ? refused.join(', ') : undefined,
     };
   }
 }
@@ -646,15 +736,28 @@ async function processPatchRow(rowData, columnMapping, srNoHeader, allowedFields
  * each is turned into a sentence that says what to do about it.
  */
 const REASON_TEXT = {
-  missing_srno: "Sr no is blank - every row must carry the 7-digit Sr no",
-  bill_not_found: "No bill exists with this Sr no",
-  permission_denied: "Your team is not permitted to update the columns filled on this row",
+  missing_srno: "Sr no is blank - every row must carry the Sr no shown on your Home tab",
+  bill_not_found: "No bill exists with this Sr no - check it against your Home tab",
+  not_on_home_tab:
+    "This bill exists but is not on your team's Home tab, so it cannot be updated from here. " +
+    "Only bills currently sitting with your team can be changed by mass update",
+  wrong_region: "This bill belongs to a region you are not assigned to",
+  permission_denied: "Your team is not permitted to update these columns",
+  paid_bill_column:
+    "This bill has been paid, so only the payment columns can still be changed " +
+    "- Payment Instructions, F110, Dt of Payment, Hard Copy, Accts Identification and Payment Amt",
   no_updates: "No recognised column on this row had a value to update",
 };
 
-const explainReason = (code, teamName) => {
+const explainReason = (code, teamName, detail) => {
   const text = REASON_TEXT[code] || `Row could not be updated (${code})`;
-  return code === "permission_denied" && teamName ? `${text} (${teamName})` : text;
+  if (code === "permission_denied") {
+    const cols = detail ? `: ${detail}` : "";
+    return teamName ? `${text}${cols} (your team: ${teamName})` : `${text}${cols}`;
+  }
+  if (code === "paid_bill_column" && detail) return `${text}. Refused: ${detail}`;
+  if (code === "wrong_region" && detail) return `${text} (${detail})`;
+  return text;
 };
 
 function formatPatchResults(updated, skipped, teamName, updateSummary, ignoredFieldsCount, allowedFields, skippedDetails, unknownHeaders = []) {
@@ -669,7 +772,7 @@ function formatPatchResults(updated, skipped, teamName, updateSummary, ignoredFi
     errors: skippedDetails.map((d) => ({
       row: d.row,
       srNo: d.srNo,
-      error: explainReason(d.reason, teamName),
+      error: explainReason(d.reason, teamName, d.detail),
     })),
     // Column headings in the uploaded file that the system does not recognise.
     // Previously these were dropped in silence, which is how two columns in the
@@ -696,7 +799,7 @@ function formatPatchResults(updated, skipped, teamName, updateSummary, ignoredFi
  * @returns {Promise<Object>} Object containing patch statistics and results
  * @throws {Error} If Excel file cannot be read or no worksheet is found
  */
-export async function patchBillsFromExcelFile(filePath, teamName = null, role = Admin) {
+export async function patchBillsFromExcelFile(filePath, teamName = null, role = Admin, user = null) {
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.readFile(filePath);
 
@@ -737,7 +840,7 @@ export async function patchBillsFromExcelFile(filePath, teamName = null, role = 
 
     const rowData = extractPatchRowData(row, headers);
 
-    const result = await processPatchRow(rowData, columnMapping, srNoHeader, allowedFields, updateSummary, ignoredFieldsCount, role);
+    const result = await processPatchRow(rowData, columnMapping, srNoHeader, allowedFields, updateSummary, ignoredFieldsCount, role, user);
 
     if (result.updated) {
       updated++;
@@ -746,7 +849,8 @@ export async function patchBillsFromExcelFile(filePath, teamName = null, role = 
       skippedDetails.push({
         row: rowNumber,
         reason: result.reason,
-        srNo: result.srNo || 'unknown'
+        srNo: result.srNo || 'unknown',
+        detail: result.detail,
       });
     }
   }

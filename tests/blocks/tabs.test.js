@@ -136,11 +136,20 @@ const srNos = (res) => {
  * HOME
  * ================================================================== */
 describe("HOME tab", () => {
-  test("Site: a bill received at site, not yet dispatched", async () => {
-    const keep = await makeBill("atSite");
-    await makeBill("dispatchedToPimo");
+  test("Site: bills at site, and those in transit to PIMO", async () => {
+    // A dispatched-but-unreceived bill now STAYS on Site Home (observation
+    // N-34). Until PIMO acknowledges it, it is still the site's problem, and
+    // previously it belonged to no tab at all.
+    const atSite = await makeBill("atSite");
+    const inTransit = await makeBill("dispatchedToPimo");
     const res = await homeOrIncoming("site_officer", "home");
-    assert.deepEqual(srNos(res), [keep.srNo]);
+    assert.deepEqual(srNos(res), [atSite.srNo, inTransit.srNo].sort());
+  });
+
+  test("Site: drops off once PIMO receives it", async () => {
+    await makeBill("receivedAtPimo");
+    const res = await homeOrIncoming("site_officer", "home");
+    assert.deepEqual(srNos(res), []);
   });
 
   test("PIMO: keyed on col 62 received, NOT col 61 dispatched", async () => {
@@ -360,7 +369,15 @@ describe("region scoping", () => {
 });
 
 /* ================================================================== *
- * T-05: Reject Payment returns the bill to the Site HOME tab
+ * Reject Payment (29.09 reply, question 5)
+ *
+ * The rule changed after this was first built. It used to send the bill all
+ * the way back to Site; the client has since said it must stay with Accounts:
+ *
+ *   "if reject payment, then only date of payment should be removed... and the
+ *    bill should move from forwarded tab to Home tab of Accounts Team. No other
+ *    data should be removed. It should not go back to PIMO/Site Team. Status at
+ *    Site should remain 'accept' only."
  * ================================================================== */
 describe("Reject Payment", () => {
   const reject = (billId, role = "accounts") =>
@@ -369,54 +386,145 @@ describe("Reject Payment", () => {
       .set("Authorization", `Bearer ${tokenFor(fixtures.users[role])}`)
       .send({ billId });
 
-  test("a rejected payment puts the bill back on Site HOME, not Site Forwarded", async () => {
+  test("the bill moves from Accounts Forwarded to Accounts HOME", async () => {
     const bill = await makeBill("paid");
-
-    // Before: paid, so it sits on the Accounts and Trustee forwarded tabs.
     assert.deepEqual(srNos(await forwarded("accounts")), [bill.srNo]);
 
     const res = await reject(bill._id.toString());
     assert.equal(res.status, 200, res.text?.slice(0, 200));
 
     assert.deepEqual(
-      srNos(await homeOrIncoming("site_officer", "home")),
+      srNos(await homeOrIncoming("accounts", "home")),
       [bill.srNo],
-      "the client asks for it on Site HOME"
+      "it belongs on the Accounts home tab"
     );
-    assert.deepEqual(
-      srNos(await forwarded("site_officer")),
-      [],
-      "and specifically NOT on Site Forwarded, which is where it went before"
-    );
+    assert.deepEqual(srNos(await forwarded("accounts")), [], "and not on their forwarded tab");
   });
 
-  test("the payment date is cleared and the status is no longer Paid", async () => {
+  test("it does NOT go back to Site or PIMO", async () => {
+    // This is the behaviour that was removed: the previous rule cleared
+    // columns 61, 62, 80 and 82 and set the status to Hold.
     const bill = await makeBill("paid");
     await reject(bill._id.toString());
 
-    const after = await Bill.findById(bill._id);
-    assert.equal(after.accountsDept.paymentDate, null);
-    assert.equal(after.accountsDept.status, "Unpaid");
-    assert.equal(after.siteStatus, "hold");
+    assert.deepEqual(srNos(await homeOrIncoming("site_officer", "home")), []);
+    assert.deepEqual(srNos(await homeOrIncoming("site_pimo", "home")), []);
   });
 
-  test("it also leaves the Accounts and Trustee forwarded tabs", async () => {
+  test("only the payment date is cleared - nothing else", async () => {
+    const bill = await makeBill("paid");
+    const before = await Bill.findById(bill._id).lean();
+
+    await reject(bill._id.toString());
+    const after = await Bill.findById(bill._id).lean();
+
+    assert.equal(after.accountsDept.paymentDate, null, "col 89 cleared");
+    assert.equal(after.siteStatus, "accept", "Status at Site must stay accept");
+
+    for (const [path, label] of [
+      ["accountsDept.dateGiven", "col 80"],
+      ["accountsDept.dateReceived", "col 82"],
+      ["pimoMumbai.dateGiven", "col 61"],
+      ["pimoMumbai.dateReceived", "col 62"],
+    ]) {
+      const [a_, b_] = path.split(".");
+      assert.deepEqual(
+        String(after[a_]?.[b_] ?? null),
+        String(before[a_]?.[b_] ?? null),
+        `${label} must be untouched`
+      );
+    }
+  });
+
+  test("payment status follows the date back to blank", async () => {
+    // Not "Unpaid" - the client removed that value entirely (29.09, item 15).
     const bill = await makeBill("paid");
     await reject(bill._id.toString());
 
-    assert.deepEqual(srNos(await forwarded("accounts")), []);
+    const after = await Bill.findById(bill._id).lean();
+    assert.ok(!after.accountsDept.status, "status must be blank, shown as '-'");
+  });
+
+  test("the Trustee forwarded tab loses it too", async () => {
+    const bill = await makeBill("paid");
+    await reject(bill._id.toString());
     assert.deepEqual(srNos(await forwarded("director")), []);
-  });
-
-  /* T-02: the old guard skipped rows whose status was already blank, so the
-   * set that most needed correcting was the set it ignored. */
-  test("a bill whose payment status was blank is set to Unpaid", async () => {
-    const bill = await makeBill("paid");
-    await Bill.updateOne({ _id: bill._id }, { $unset: { "accountsDept.status": "" } });
-
-    await reject(bill._id.toString());
-    const after = await Bill.findById(bill._id);
-    assert.equal(after.accountsDept.status, "Unpaid", "blank must not stay blank");
   });
 });
 
+/* ================================================================== *
+ * The status matrix (mail of 24 September, item 2)
+ *
+ * Until now a tab was decided purely by which dates were filled. The client
+ * has added a second axis: Status at Site and Payment Status.
+ * ================================================================== */
+describe("status and payment narrow the tabs", () => {
+  test("PIMO Home excludes Reject and Proforma", async () => {
+    // "Bills with status at site - Reject and Proforma - are appearing in Home
+    // tab of PIMO Team. Only status accept should appear."
+    const keep = await makeBill("receivedAtPimo", { siteStatus: "accept" });
+    await makeBill("receivedAtPimo", { siteStatus: "reject" });
+    await makeBill("receivedAtPimo", { siteStatus: "proforma" });
+    await makeBill("receivedAtPimo", { siteStatus: "hold" });
+
+    const res = await homeOrIncoming("site_pimo", "home");
+    assert.deepEqual(srNos(res), [keep.srNo]);
+  });
+
+  test("PIMO Home excludes paid bills", async () => {
+    // She named 2600025, 2600027, 2600028 and 2600029 as paid bills sitting
+    // on the PIMO home tab.
+    const keep = await makeBill("receivedAtPimo", { siteStatus: "accept" });
+    await makeBill("receivedAtPimo", {
+      siteStatus: "accept",
+      "accountsDept.paymentDate": D("2026-07-25"), // status follows the date
+    });
+
+    const res = await homeOrIncoming("site_pimo", "home");
+    assert.deepEqual(srNos(res), [keep.srNo]);
+  });
+
+  test("a blank payment status does not hide a bill", async () => {
+    // Legacy rows carry no status at all. Membership is tested as "not Paid"
+    // rather than "equals Unpaid" so those rows stay visible until the N-28
+    // backfill has run.
+    const keep = await makeBill("receivedAtPimo", { siteStatus: "accept" });
+    await Bill.updateOne({ _id: keep._id }, { $unset: { "accountsDept.status": "" } });
+
+    const res = await homeOrIncoming("site_pimo", "home");
+    assert.deepEqual(srNos(res), [keep.srNo]);
+  });
+
+  test("Accounts Home takes only accepted bills", async () => {
+    // This was deliberately looser until the client confirmed the workflow
+    // guarantees the status: "Site Team can't send the bill to Accounts Team...
+    // Once the bill is accepted in PIMO, Status at Site changes to Accept."
+    const keep = await makeBill("receivedInAccounts", { siteStatus: "accept" });
+    await makeBill("receivedInAccounts", { siteStatus: "hold" });
+    await makeBill("receivedInAccounts", { siteStatus: "reject" });
+
+    const res = await homeOrIncoming("accounts", "home");
+    assert.deepEqual(srNos(res), [keep.srNo]);
+  });
+
+  test("QS Forwarded also takes Proforma and Reject bills", async () => {
+    // observation N-17: those bills never come back from QS, so column 66
+    // alone left them on the QS home tab for ever.
+    const returned = await makeBill("returnedByQs");
+    const proforma = await makeBill("withQs", { siteStatus: "proforma" });
+    const reject = await makeBill("withQs", { siteStatus: "reject" });
+
+    const res = await forwarded("qs_site");
+    assert.deepEqual(srNos(res), [returned.srNo, proforma.srNo, reject.srNo].sort());
+  });
+
+  test("QS Home sorts on col 40 before col 35", async () => {
+    // observation N-35.
+    const { SORT_FIELD } = await import("../../utils/tab-predicates.js");
+    assert.deepEqual(SORT_FIELD.home.qs_site, [
+      "qsCOP.dateGiven",       // 40
+      "qsInspection.dateGiven", // 35
+      "qsMumbai.dateGiven",     // 64
+    ]);
+  });
+});

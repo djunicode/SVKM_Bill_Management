@@ -72,7 +72,6 @@ const srNos = (res) => {
 describe("GET /bill uses the tab register", () => {
   test("Site sees a bill waiting at site", async () => {
     const keep = await makeBill();
-    await makeBill({ "pimoMumbai.dateGiven": D("2026-07-10"), currentCount: 3 });
 
     const res = await request(app)
       .get("/bill")
@@ -82,11 +81,32 @@ describe("GET /bill uses the tab register", () => {
     assert.deepEqual(srNos(res), [keep.srNo]);
   });
 
-  test("Site does NOT see a bill already dispatched to PIMO", async () => {
-    // The old inline rule was "col 62 blank", which still matched a bill that
-    // had been dispatched but not yet received - it appeared on Site's Home
-    // tab and on PIMO's Incoming tab at the same time.
-    await makeBill({ "pimoMumbai.dateGiven": D("2026-07-10"), currentCount: 3 });
+  test("Site still sees a bill dispatched to PIMO but not yet received", async () => {
+    // Reverses the previous rule, at the client's request (observation N-34).
+    //
+    // Site Home used to require col 61 BLANK, and Site Forwarded requires col
+    // 62 FILLED. A bill dispatched but not acknowledged has 61 filled and 62
+    // blank, so it satisfied neither and showed on no tab at all. It now stays
+    // on Site Home - and on PIMO's Incoming tab - until PIMO receives it.
+    const inTransit = await makeBill({
+      "pimoMumbai.dateGiven": D("2026-07-10"),
+      currentCount: 3,
+    });
+
+    const res = await request(app)
+      .get("/bill")
+      .set("Authorization", `Bearer ${tokenFor(fixtures.users.site_officer)}`);
+
+    assert.deepEqual(srNos(res), [inTransit.srNo]);
+  });
+
+  test("Site loses the bill once PIMO receives it", async () => {
+    await makeBill({
+      "pimoMumbai.dateGiven": D("2026-07-10"),
+      "pimoMumbai.dateReceived": D("2026-07-12"),
+      siteStatus: "accept",
+      currentCount: 3,
+    });
 
     const res = await request(app)
       .get("/bill")
@@ -99,6 +119,7 @@ describe("GET /bill uses the tab register", () => {
     const keep = await makeBill({
       "pimoMumbai.dateGiven": D("2026-07-10"), // col 61
       "pimoMumbai.dateReceived": D("2026-07-12"), // col 62
+      siteStatus: "accept",
       currentCount: 3,
     });
     await makeBill({ "pimoMumbai.dateGiven": D("2026-07-10"), currentCount: 3 });
@@ -114,6 +135,7 @@ describe("GET /bill uses the tab register", () => {
     const keep = await makeBill({
       "accountsDept.dateGiven": D("2026-07-20"), // col 80
       "accountsDept.dateReceived": D("2026-07-22"), // col 82
+      siteStatus: "accept",
       currentCount: 5,
     });
     await makeBill({ "accountsDept.dateGiven": D("2026-07-20"), currentCount: 5 });
@@ -130,6 +152,7 @@ describe("GET /bill uses the tab register", () => {
     await makeBill({
       "pimoMumbai.dateGiven": D("2026-07-10"),
       "pimoMumbai.dateReceived": D("2026-07-12"),
+      siteStatus: "accept",
       currentCount: 3,
     });
 
@@ -317,11 +340,13 @@ describe("tab sort order", () => {
     const dispatchedFirst = await makeBill({
       "pimoMumbai.dateGiven": D("2026-07-01"),
       "pimoMumbai.dateReceived": D("2026-07-05"),
+      siteStatus: "accept",
       currentCount: 3,
     });
     const receivedLater = await makeBill({
       "pimoMumbai.dateGiven": D("2026-07-20"),
       "pimoMumbai.dateReceived": D("2026-07-25"),
+      siteStatus: "accept",
       currentCount: 3,
     });
 

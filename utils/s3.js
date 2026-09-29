@@ -1,6 +1,6 @@
 import { S3 } from "@aws-sdk/client-s3";
 
-export const s3Upload = async (file) => {
+export const s3Upload = async (file, prefix = "uploads") => {
   const s3 = new S3({
     region: process.env.S3_REGION,
     credentials: {
@@ -13,7 +13,7 @@ export const s3Upload = async (file) => {
     throw new Error("No file provided");
   }
 
-  const fileKey = `uploads/${Date.now()}-${file.originalname.replace(
+  const fileKey = `${prefix}/${Date.now()}-${file.originalname.replace(
     / /g,
     "-"
   )}`;
@@ -82,4 +82,28 @@ export const s3Delete = async (fileKey) => {
     success: true,
     message: `File ${fileKey} deleted successfully`,
   };
+};
+
+/**
+ * Fetch an object's bytes. Used by the forms repository (29.09, reply Q2) so a
+ * download can be served with the form's original filename.
+ */
+export const s3Get = async (fileKey) => {
+  const s3 = new S3({
+    region: process.env.S3_REGION,
+    credentials: {
+      accessKeyId: process.env.S3_ACCESS_KEY_ID,
+      secretAccessKey: process.env.S3_SECRET_ACCESS_KEY,
+    },
+  });
+
+  if (!fileKey) {
+    throw new Error("No file key provided");
+  }
+
+  const res = await s3.getObject({
+    Bucket: process.env.S3_BUCKET_NAME,
+    Key: fileKey,
+  });
+  return Buffer.from(await res.Body.transformToByteArray());
 };
