@@ -661,3 +661,25 @@ describe("QS Mark as not received", () => {
     assert.equal(b.qsCOP.dateGiven, null, "the other steps back to col 40");
   });
 });
+
+/* ================================================================== *
+ * PIMO's Trustee option renamed (1.10, item 12)
+ * ================================================================== */
+describe("PIMO Unsend of the Trustee send, under either label", () => {
+  for (const label of ["Trustee, Advisor & Director", "Director/Advisor/Trustee"]) {
+    test(`"${label}" clears column 77`, async () => {
+      const bill = await makeBill({
+        siteStatus: "accept",
+        "pimoMumbai.dateReceived": D("2026-07-20"),
+        "approvalDetails.directorApproval.dateGiven": D("2026-07-25"),
+      });
+      const res = await request(app)
+        .post("/bill/delete-date")
+        .set("Authorization", `Bearer ${tokenFor(fixtures.users.site_pimo)}`)
+        .send({ teamName: "PIMO Team", sendTo: label, billId: [String(bill._id)] });
+      assert.equal(res.status, 200, res.text?.slice(0, 200));
+      const after = await reload(bill);
+      assert.equal(after.approvalDetails?.directorApproval?.dateGiven ?? null, null);
+    });
+  }
+});

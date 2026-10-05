@@ -604,3 +604,12 @@ describe("serial numbers are 8 digits: financial year + six-digit sequence", () 
     assert.equal(found.status, 200, found.text?.slice(0, 200));
   });
 });
+
+/* Column 2 shows the creator's name and team (1.10, item 10). */
+describe("Created by shows name and team", () => {
+  test("a new bill's createdByLabel is 'name - team'", async () => {
+    const res = await createBill({ billDate: "2026-08-01" });
+    assert.equal(res.body.bill.createdByLabel, `${fixtures.users.site_officer.name} - IMD Site Team`);
+    assert.equal(res.body.bill.createdBy, fixtures.users.site_officer.name, "name kept on its own");
+  });
+});

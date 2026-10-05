@@ -29,6 +29,11 @@ export const flattenBill = (bill, { keepVendor = false } = {}) => {
     ? obj.region.map((r) => r?.name || r)
     : obj.region?.name || obj.region;
 
+  // Column 2 as the grids show it: login name and team (1.10, item 10).
+  // createdBy and createdByTeam stay separate for the checklists.
+  obj.createdByLabel =
+    [obj.createdBy, obj.createdByTeam].filter(Boolean).join(" - ") || null;
+
   obj.currency = obj.currency?.currency || obj.currency || null;      // col 22
   obj.natureOfWork = obj.natureOfWork?.natureOfWork || obj.natureOfWork || null; // col 3
 

@@ -236,14 +236,35 @@ export const daysBetween = (date1, date2) => {
 export const fiscalYearStartISO = () => "2025-04-01";
 export const todayISO = () => new Date().toISOString().split("T")[0];
 
+/**
+ * Bill Kidhar and Bill Journey (1.10, item O-02): the date criteria apply to
+ * column 24 "Dt recd at Site", not the Tax Inv Date, and the default window
+ * is 01-04-2020 to today.
+ */
+export const KIDHAR_JOURNEY_DEFAULT_START = "2020-04-01";
+
+// Column 24 newest first, then Sr no descending (1.10, item O-02).
+export const KIDHAR_JOURNEY_SORT = { [FIELDS.taxInvRecdAtSite]: -1, srNo: -1 };
+
 export const applyKidharJourneyDateRange = (filter, query) => {
-  const startDate = normalizeQueryValue(query.startDate) || fiscalYearStartISO();
+  const startDate = normalizeQueryValue(query.startDate) || KIDHAR_JOURNEY_DEFAULT_START;
   const endDate = normalizeQueryValue(query.endDate) || todayISO();
-  filter.taxInvDate = {
+  const field = FIELDS.taxInvRecdAtSite;
+  // Keep the "filled" test the reports already put on this column.
+  filter[field] = {
+    ...(filter[field] && typeof filter[field] === "object" ? filter[field] : {}),
     $gte: startOfDay(startDate),
     $lte: endOfDay(endDate),
   };
   return { startDate, endDate };
+};
+
+/** The nature of work's name, whether populated or not (1.10, item O-19). */
+export const natureOfWorkName = (bill) => {
+  const value = bill?.natureOfWork;
+  if (!value) return "";
+  if (typeof value === "object" && "natureOfWork" in value) return value.natureOfWork || "";
+  return typeof value === "string" ? value : "";
 };
 
 export const applyPaymentStatusFilter = (filter, paymentStatus) => {

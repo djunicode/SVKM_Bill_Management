@@ -19,9 +19,10 @@ import {
   buildReportResponse,
   appendGrandTotalTaxAmount,
   appendGrandTotalCourierStyle,
-  sortUnpaidFirstThenAmountDesc,
+  KIDHAR_JOURNEY_SORT,
   daysBetween,
   escapeRegex,
+  natureOfWorkName,
 } from "../utils/report-utils.js";
 
 const handleReportError = (res, error, label) => {
@@ -73,7 +74,8 @@ export const getOutstandingBillsReport = async (req, res) => {
     await applyVendorFilter(filter, vendor || vendorName);
 
     const outstandingBills = await Bill.find(filter)
-      .populate("vendor");
+      .populate("vendor")
+      .populate("natureOfWork");
 
     const vendorGroups = {};
     outstandingBills.forEach((bill) => {
@@ -114,6 +116,7 @@ export const getOutstandingBillsReport = async (req, res) => {
           // Instructions straight back to the bill (23.09, item 13).
           _id: bill._id,
           srNo: bill.srNo,
+          natureOfWork: natureOfWorkName(bill), // reports' Nature of Work filter (1.10, item O-19)
           projectDescription: bill.projectDescription || "",
           region: bill.region || "",
           vendorNo: bill.vendor?.vendorNo || "",
@@ -217,7 +220,7 @@ export const getOutstandingBillsSubtotalReport = async (req, res) => {
     applyRegionFilter(filter, region, req.user);
     await applyVendorFilter(filter, vendor || vendorName);
 
-    const outstandingBills = await Bill.find(filter).populate("vendor");
+    const outstandingBills = await Bill.find(filter).populate("vendor").populate("natureOfWork");
 
     const vendorGroups = {};
     outstandingBills.forEach((bill) => {
@@ -253,6 +256,7 @@ export const getOutstandingBillsSubtotalReport = async (req, res) => {
 
         reportData.push({
           srNo: bill.srNo,
+          natureOfWork: natureOfWorkName(bill), // reports' Nature of Work filter (1.10, item O-19)
           region: bill.region || "",
           vendorNo: bill.vendor?.vendorNo || "",
           vendorName: bill.vendor?.vendorName || "",
@@ -321,6 +325,7 @@ export const getInvoicesReceivedAtSite = async (req, res) => {
     const reportData = appendGrandTotalTaxAmount(
       bills.map((invoice) => ({
         srNo: invoice.srNo,
+        natureOfWork: natureOfWorkName(invoice), // reports' Nature of Work filter (1.10, item O-19)
         region: invoice.region,
         projectDescription: invoice.projectDescription,
         vendorNo: invoice.vendor?.vendorNo || "",
@@ -365,6 +370,7 @@ export const getInvoicesReceivedAtPIMOMumbai = async (req, res) => {
     const reportData = appendGrandTotalTaxAmount(
       bills.map((invoice) => ({
         srNo: invoice.srNo,
+        natureOfWork: natureOfWorkName(invoice), // reports' Nature of Work filter (1.10, item O-19)
         region: invoice.region,
         projectDescription: invoice.projectDescription,
         vendorNo: invoice.vendor?.vendorNo || "",
@@ -417,6 +423,7 @@ export const getInvoicesGivenToQsSite = async (req, res) => {
     const reportData = appendGrandTotalTaxAmount(
       bills.map((invoice) => ({
         srNo: invoice.srNo,
+        natureOfWork: natureOfWorkName(invoice), // reports' Nature of Work filter (1.10, item O-19)
         region: invoice.region,
         projectDescription: invoice.projectDescription,
         vendorNo: invoice.vendor?.vendorNo || "",
@@ -460,6 +467,7 @@ export const getInvoicesAtQSforProvCOP = async (req, res) => {
     const reportData = appendGrandTotalTaxAmount(
       bills.map((invoice) => ({
         srNo: invoice.srNo,
+        natureOfWork: natureOfWorkName(invoice), // reports' Nature of Work filter (1.10, item O-19)
         region: invoice.region,
         projectDescription: invoice.projectDescription,
         vendorNo: invoice.vendor?.vendorNo || "",
@@ -511,6 +519,7 @@ export const getInvoicesAtQSMumbai = async (req, res) => {
     const reportData = appendGrandTotalTaxAmount(
       bills.map((invoice) => ({
         srNo: invoice.srNo,
+        natureOfWork: natureOfWorkName(invoice), // reports' Nature of Work filter (1.10, item O-19)
         region: invoice.region,
         projectDescription: invoice.projectDescription,
         vendorNo: invoice.vendor?.vendorNo || "",
@@ -555,6 +564,7 @@ export const getInvoicesCourierToPIMOMumbai = async (req, res) => {
     const reportData = appendGrandTotalCourierStyle(
       bills.map((invoice) => ({
         srNo: invoice.srNo,
+        natureOfWork: natureOfWorkName(invoice), // reports' Nature of Work filter (1.10, item O-19)
         vendorNo: invoice.vendor?.vendorNo || "", // col 6 - Report logics General #3
         vendorName: invoice.vendor?.vendorName || "",
         taxInvNo: invoice.taxInvNo,
@@ -596,6 +606,7 @@ export const getInvoicesReturnedByQsSite = async (req, res) => {
     const reportData = appendGrandTotalCourierStyle(
       bills.map((invoice) => ({
         srNo: invoice.srNo,
+        natureOfWork: natureOfWorkName(invoice), // reports' Nature of Work filter (1.10, item O-19)
         vendorNo: invoice.vendor?.vendorNo || "", // col 6 - Report logics General #3
         vendorName: invoice.vendor?.vendorName || "",
         taxInvNo: invoice.taxInvNo,
@@ -636,6 +647,7 @@ export const getInvoicesReturnedByQsCOP = async (req, res) => {
     const reportData = appendGrandTotalCourierStyle(
       bills.map((invoice) => ({
         srNo: invoice.srNo,
+        natureOfWork: natureOfWorkName(invoice), // reports' Nature of Work filter (1.10, item O-19)
         vendorNo: invoice.vendor?.vendorNo || "", // col 6 - Report logics General #3
         vendorName: invoice.vendor?.vendorName || "",
         taxInvNo: invoice.taxInvNo,
@@ -676,6 +688,7 @@ export const getInvoicesReturnedByQSMumbai = async (req, res) => {
     const reportData = appendGrandTotalCourierStyle(
       bills.map((invoice) => ({
         srNo: invoice.srNo,
+        natureOfWork: natureOfWorkName(invoice), // reports' Nature of Work filter (1.10, item O-19)
         vendorNo: invoice.vendor?.vendorNo || "", // col 6 - Report logics General #3
         vendorName: invoice.vendor?.vendorName || "",
         taxInvNo: invoice.taxInvNo,
@@ -721,6 +734,7 @@ export const getInvoicesGivenToAcctsDept = async (req, res) => {
     const reportData = appendGrandTotalCourierStyle(
       bills.map((invoice) => ({
         srNo: invoice.srNo,
+        natureOfWork: natureOfWorkName(invoice), // reports' Nature of Work filter (1.10, item O-19)
         vendorNo: invoice.vendor?.vendorNo || "", // col 6 - Report logics General #3
         vendorName: invoice.vendor?.vendorName || "",
         taxInvNo: invoice.taxInvNo,
@@ -767,10 +781,12 @@ export const getInvoicesPaid = async (req, res) => {
 
     const bills = await Bill.find(filter)
       .sort({ "accountsDept.paymentDate": -1 })
-      .populate("vendor");
+      .populate("vendor")
+      .populate("natureOfWork");
 
     const reportData = bills.map((invoice) => ({
       srNo: invoice.srNo,
+      natureOfWork: natureOfWorkName(invoice), // reports' Nature of Work filter (1.10, item O-19)
       dateReceivedAtAccts: fmt(invoice.accountsDept?.dateReceived),
       dateOfPayment: fmt(invoice.accountsDept?.paymentDate),
       vendorNo: invoice.vendor?.vendorNo || "",
@@ -844,11 +860,15 @@ export const getBillKidharReport = async (req, res) => {
     await applyVendorFilter(filter, vendorName);
     applyTaxInvNoFilter(filter, taxInvNo);
 
-    const bills = await Bill.find(filter).populate("vendor");
-    const sorted = sortUnpaidFirstThenAmountDesc(bills);
+    // Column 24 newest first, then Sr no descending (1.10, item O-02).
+    const sorted = await Bill.find(filter)
+      .sort(KIDHAR_JOURNEY_SORT)
+      .populate("vendor")
+      .populate("natureOfWork");
 
     const rows = sorted.map((bill) => ({
       srNo: bill.srNo || "",
+      natureOfWork: natureOfWorkName(bill), // reports' Nature of Work filter (1.10, item O-19)
       region: bill.region || "",
       vendorNo: bill.vendor?.vendorNo || "",
       vendorName: bill.vendor?.vendorName || "",
@@ -876,8 +896,8 @@ export const getBillKidharReport = async (req, res) => {
           region: region || "All",
           vendorName: vendorName || "All",
           paymentStatus: paymentStatus || "All",
-          logic: "Dt recd at Site filled",
-          sorting: ["Unpaid first", "Tax Inv Amt highest to lowest"],
+          logic: "Dt recd at Site filled; date range applies to Dt recd at Site (col 24)",
+          sorting: ["Dt recd at Site newest first", "Sr no descending"],
         },
         reportData
       )
@@ -906,8 +926,12 @@ export const getBillJourney = async (req, res) => {
     await applyVendorFilter(filter, vendorName);
     applyTaxInvNoFilter(filter, taxInvNo);
 
-    const bills = await Bill.find(filter).populate("vendor").populate("natureOfWork").populate("currency");
-    const sorted = sortUnpaidFirstThenAmountDesc(bills);
+    // Column 24 newest first, then Sr no descending (1.10, item O-02).
+    const sorted = await Bill.find(filter)
+      .sort(KIDHAR_JOURNEY_SORT)
+      .populate("vendor")
+      .populate("natureOfWork")
+      .populate("currency");
 
     let totalInvoiceAmount = 0;
     let totalSiteDays = 0;

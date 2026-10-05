@@ -821,3 +821,87 @@ describe("Bill Journey: the submission row takes column 81", () => {
     assert.equal(row.receivedInAccountsDepartmentName, "Accts Clerk");
   });
 });
+
+/* ================================================================== *
+ * Mail of 1 October
+ * ================================================================== */
+describe("Bill Kidhar and Bill Journey key on column 24 (1.10, item O-02)", () => {
+  const PATHS = [
+    ["/api/reports/bill-kidhar", "admin"],
+    ["/api/reports/bill-journey", "admin"],
+  ];
+
+  for (const [path, role] of PATHS) {
+    const name = path.replace("/api/reports/", "");
+
+    test(`${name}: the date range applies to Dt recd at Site, not Tax Inv Date`, async () => {
+      // Invoice dated inside the window but received at site after it.
+      await makeBill({
+        srNo: "2627801",
+        taxInvDate: new Date("2026-07-05"),
+        taxInvRecdAtSite: new Date("2026-08-20"),
+      });
+      // Invoice dated before the window but received at site inside it.
+      await makeBill({
+        srNo: "2627802",
+        taxInvDate: new Date("2026-05-01"),
+        taxInvRecdAtSite: new Date("2026-07-10"),
+      });
+      const res = await get(path, role, { startDate: "2026-07-01", endDate: "2026-07-31" });
+      assert.equal(res.status, 200, res.text?.slice(0, 200));
+      assert.deepEqual(rowsOf(res).map((r) => r.srNo), ["2627802"]);
+    });
+
+    test(`${name}: with no dates the window is 01-04-2020 to today`, async () => {
+      await makeBill({ srNo: "2627811", taxInvDate: new Date("2020-03-01"), taxInvRecdAtSite: new Date("2020-04-02") });
+      await makeBill({ srNo: "2627812", taxInvDate: new Date("2020-03-01"), taxInvRecdAtSite: new Date("2020-03-20") });
+      const res = await get(path, role);
+      const srNos = rowsOf(res).map((r) => r.srNo);
+      assert.ok(srNos.includes("2627811"), "received on 02-04-2020 is inside the default window");
+      assert.ok(!srNos.includes("2627812"), "received before 01-04-2020 is outside it");
+    });
+
+    test(`${name}: sorted by Dt recd at Site descending, then Sr no descending`, async () => {
+      const shared = new Date("2026-08-01");
+      await makeBill({ srNo: "2627821", taxInvRecdAtSite: shared, taxInvAmt: 900000 });
+      await makeBill({ srNo: "2627823", taxInvRecdAtSite: shared, taxInvAmt: 100 });
+      await makeBill({ srNo: "2627822", taxInvRecdAtSite: new Date("2026-08-15"), taxInvAmt: 50 });
+      await makeBill({
+        srNo: "2627824",
+        taxInvRecdAtSite: new Date("2026-07-15"),
+        "accountsDept.paymentDate": new Date("2026-08-30"),
+      });
+      const res = await get(path, role);
+      assert.deepEqual(
+        rowsOf(res).map((r) => r.srNo),
+        ["2627822", "2627823", "2627821", "2627824"]
+      );
+    });
+  }
+});
+
+describe("reports carry Nature of Work for the global filter (1.10, item O-19)", () => {
+  const CASES = [
+    ["/api/reports/invoices-received-at-site", "site_officer", {}],
+    ["/api/reports/invoices-courier-to-pimo-mumbai", "site_officer", { "pimoMumbai.dateGiven": new Date("2026-07-10") }],
+    ["/api/reports/outstanding-bills", "accounts", { siteStatus: "accept", "accountsDept.dateReceived": new Date("2026-07-25") }],
+    ["/api/reports/invoices-paid", "accounts", {
+      siteStatus: "accept",
+      "accountsDept.dateReceived": new Date("2026-07-25"),
+      "accountsDept.paymentDate": new Date("2026-08-01"),
+    }],
+    ["/api/reports/bill-kidhar", "admin", {}],
+    ["/api/reports/bill-journey", "admin", {}],
+  ];
+
+  for (const [path, role, fields] of CASES) {
+    test(`${path.replace("/api/reports/", "")} projects natureOfWork by name`, async () => {
+      await makeBill(fields);
+      const res = await get(path, role);
+      assert.equal(res.status, 200, res.text?.slice(0, 200));
+      const rows = rowsOf(res);
+      assert.ok(rows.length >= 1, "no rows returned");
+      assert.equal(rows[0].natureOfWork, fixtures.natures[0].natureOfWork);
+    });
+  }
+});

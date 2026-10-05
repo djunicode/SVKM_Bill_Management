@@ -1821,6 +1821,11 @@ const deleteDate = async (req, res) => {
         "Director/Advisor/Trustee": {
           fields: ["approvalDetails.directorApproval.dateGiven"], // 77
         },
+        // The label as renamed on 1.10 (item 12); the old one is kept so a
+        // browser still running the previous build keeps working.
+        "Trustee, Advisor & Director": {
+          fields: ["approvalDetails.directorApproval.dateGiven"], // 77
+        },
         "Accounts Team": { fields: ["accountsDept.dateGiven", "accountsDept.givenBy"] }, // 80, 81
         "Mark as not received": {
           fields: ["pimoMumbai.dateGiven", "pimoMumbai.dateReceived", "pimoMumbai.receivedBy"], // 61, 62, 63
